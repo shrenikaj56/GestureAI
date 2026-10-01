@@ -1,0 +1,39 @@
+{
+  "gesture_actions": {
+    "open_palm": "noop",
+    "fist": "noop",
+    "thumbs_up": "confirm",
+    "thumbs_down": "cancel",
+    "pinch": "toggle_focus",
+    "swipe_left": "previous",
+    "swipe_right": "next"
+  },
+  "contexts": {
+    "browser": {
+      "swipe_left": "back",
+      "swipe_right": "forward",
+      "pinch": "scroll_up",
+      "thumbs_up": "confirm"
+    },
+    "powerpoint": {
+      "swipe_left": "previous_slide",
+      "swipe_right": "next_slide",
+      "pinch": "toggle_highlight",
+      "thumbs_up": "confirm"
+    }
+  },
+  "safe_actions": [
+    "noop",
+    "next",
+    "previous",
+    "forward",
+    "back",
+    "confirm",
+    "cancel",
+    "toggle_focus",
+    "scroll_up",
+    "next_slide",
+    "previous_slide",
+    "toggle_highlight"
+  ]
+}
