@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import time
-from datetime import datetime
+from collections import Counter
+from pathlib import Path
 from time import monotonic
 from typing import Any, List
 
@@ -10,36 +12,15 @@ import cv2
 import numpy as np
 import streamlit as st
 
+from src.control.action_manager import ActionManager
+from src.control.powerpoint_launcher import launch_powerpoint
 from src.ml.dataset import GestureDataset
-from src.ml.dynamic_dataset import DynamicSequenceDataset
-from src.ml.dynamic_features import LANDMARK_COUNT, extract_dynamic_features
-from src.ml.dynamic_predictor import DynamicGesturePredictor
-from src.ml.dynamic_trainer import DynamicGestureTrainer
 from src.ml.evaluator import GestureEvaluator
 from src.ml.predictor import GesturePredictor
 from src.ml.trainer import GestureTrainer
-from src.utils.config import (
-    DATASET_PATH,
-    DEFAULT_GESTURES,
-    DYNAMIC_CLASSES,
-    DYNAMIC_CONFIDENCE_THRESHOLD,
-    DYNAMIC_CONFIRMATION_COUNT,
-    DYNAMIC_DATA_DIR,
-    DYNAMIC_EVALUATION_PATH,
-    DYNAMIC_MODEL_PATH,
-    DYNAMIC_SEQUENCE_LENGTH,
-    EVALUATION_PATH,
-    MODEL_PATH,
-    MODEL_VERSION,
-    DYNAMIC_COLLECTION_COUNT_OPTIONS,
-    DYNAMIC_COLLECTION_DURATION_SECONDS,
-    DYNAMIC_COLLECTION_PAUSE_SECONDS,
-    DYNAMIC_MIN_VALID_FRAMES,
-)
-from src.utils.temporal_swipe_detector import TemporalSwipeDetector
+from src.utils.config import DATASET_PATH, DEFAULT_GESTURES, EVALUATION_PATH, MODEL_PATH, MODEL_VERSION
 from src.vision.feature_extractor import extract_feature_vector
 from src.vision.hand_detector import HandDetector
-
 
 st.set_page_config(page_title="GestureAI", page_icon="🤖", layout="wide")
 
@@ -60,13 +41,8 @@ def get_trainer() -> GestureTrainer:
 
 
 @st.cache_resource
-def get_dynamic_predictor() -> DynamicGesturePredictor:
-    return DynamicGesturePredictor()
-
-
-@st.cache_resource
-def get_temporal_swipe_detector() -> TemporalSwipeDetector:
-    return TemporalSwipeDetector()
+def get_action_manager() -> ActionManager:
+    return ActionManager()
 
 
 def load_or_create_dataset() -> GestureDataset:
@@ -80,19 +56,34 @@ def parse_dataset_for_ui() -> List[str]:
     return sorted(dataset["gesture"].dropna().unique().tolist())
 
 
+def ensure_session_state() -> None:
+    st.session_state.setdefault("intro_done", False)
+    st.session_state.setdefault("splash_done", False)
+    st.session_state.setdefault("startup_seen", False)
+    st.session_state.setdefault("splash_started_at", monotonic())
+    st.session_state.setdefault("camera_running", False)
+    st.session_state.setdefault("camera", None)
+    st.session_state.setdefault("computer_control", False)
+    st.session_state.setdefault("runtime_control_blocked", False)
+    st.session_state.setdefault("app_mode", "PowerPoint")
+    st.session_state.setdefault("gesture_history", [])
+    st.session_state.setdefault("last_stable_gesture", None)
+    st.session_state.setdefault("action_status", "Waiting for gesture")
+    st.session_state.setdefault("last_action_time", 0.0)
+    st.session_state.setdefault("last_action_gesture", None)
+    st.session_state.setdefault("last_action_until", 0.0)
+    st.session_state.setdefault("pinch_active", False)
+    st.session_state.setdefault("last_processed_gesture", None)
+    st.session_state.setdefault("powerpoint_launched", False)
+    st.session_state.setdefault("gesture_event_debug", "")
+
+
 def camera_status() -> str:
     return "Connected" if st.session_state.get("camera_running", False) else "Not Connected"
 
 
 def model_status() -> str:
     return "Trained" if MODEL_PATH.exists() else "Not Trained"
-
-
-def dataset_status(dataset: GestureDataset) -> str:
-    errors = dataset.validate()
-    if not dataset.dataset_path.exists() or dataset.load().empty:
-        return "Empty"
-    return "Available" if not errors else "Needs More Data"
 
 
 def render_status(label: str, value: str, color: str) -> None:
@@ -105,7 +96,7 @@ def render_status(label: str, value: str, color: str) -> None:
 def compute_hand_center_xy(hand_landmarks: Any) -> tuple[float, float] | None:
     if hand_landmarks is None:
         return None
-    anchor_indices = [0, 5, 8, 9, 12, 13, 17, 20]
+    anchor_indices = [0, 5, 9, 13, 17]
     xs = []
     ys = []
     for index in anchor_indices:
@@ -122,270 +113,317 @@ def stop_camera() -> None:
     if camera is not None:
         camera.release()
     st.session_state["camera_running"] = False
-    st.session_state.pop("dynamic_sequence_buffer", None)
 
 
-def reset_dynamic_collection() -> None:
-    camera = st.session_state.pop("camera", None)
-    if camera is not None:
-        camera.release()
-    st.session_state["camera_running"] = False
-    for key in (
-        "dynamic_collection_active",
-        "dynamic_collection_state",
-        "dynamic_collection_frames",
-        "dynamic_collection_recording_started",
-        "dynamic_collection_state_started",
-        "dynamic_collection_total_frames",
-    ):
-        st.session_state.pop(key, None)
+def enter_gestureai() -> None:
+    st.session_state["intro_done"] = True
+    st.session_state["splash_done"] = True
+    st.session_state["startup_seen"] = True
 
 
-def start_dynamic_collection(label: str, target_count: int) -> None:
-    """Initialize a fixed-duration collection session."""
-    camera = st.session_state.get("camera")
-    if camera is None or not camera.isOpened():
-        camera = cv2.VideoCapture(0)
-        if not camera.isOpened():
-            camera.release()
-            raise RuntimeError("Camera could not be accessed for dynamic collection.")
-        st.session_state["camera"] = camera
-    st.session_state.update(
-        {
-            "camera_running": True,
-            "dynamic_collection_active": True,
-            "dynamic_collection_label": label,
-            "dynamic_collection_target": int(target_count),
-            "dynamic_collection_current": 0,
-            "dynamic_collection_state": "countdown",
-            "dynamic_collection_state_started": monotonic(),
-            "dynamic_collection_recording_started": None,
-            "dynamic_collection_frames": [],
-            "dynamic_collection_total_frames": 0,
+def render_intro_video() -> None:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+            background: #050b16;
         }
+        header, footer, #MainMenu {
+            visibility: hidden;
+        }
+        .block-container {
+            padding-top: 5vh;
+        }
+        div[data-testid="stVideo"] {
+            max-width: 1280px;
+            margin: 0 auto;
+        }
+        .intro-fallback {
+            min-height: min(62vw, 720px);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #eaf6ff;
+            text-align: center;
+            background: radial-gradient(ellipse at 50% 54%, #102136 0%, #050b16 68%);
+        }
+        .intro-fallback h1 {
+            font-size: clamp(2.8rem, 7vw, 6rem);
+            font-weight: 300;
+            margin: 0;
+        }
+        .intro-fallback p {
+            color: #a9c5da;
+            font-size: 1.15rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
+    video_path = Path(__file__).resolve().parent / "assets" / "gestureai_intro.mp4"
+    video_column = st.columns([0.15, 5, 0.15])[1]
+    with video_column:
+        if video_path.is_file():
+            st.video(str(video_path), autoplay=True, muted=True)
+        else:
+            st.markdown(
+                '<div class="intro-fallback"><h1>GestureAI</h1>'
+                '<p>Move naturally, control digitally.</p></div>',
+                unsafe_allow_html=True,
+            )
+    button_column = st.columns([1, 1, 1])[1]
+    with button_column:
+        st.button("Enter GestureAI", key="enter_gestureai_button", on_click=enter_gestureai)
 
-@st.fragment(run_every="100ms")
-def render_dynamic_collection(preview_display: Any, progress_display: Any, status_display: Any) -> None:
-    """Capture one frame per tick; sequence boundaries use wall-clock time."""
-    if not st.session_state.get("dynamic_collection_active"):
-        return
-    camera = st.session_state.get("camera")
-    if camera is None or not camera.isOpened():
-        status_display.error("Camera could not be accessed. Collection stopped safely.")
-        reset_dynamic_collection()
+
+def normalize_gesture(prediction: Any) -> str | None:
+    token = re.sub(r"[\s_-]+", "", str(prediction).strip().upper())
+    labels = {
+        "OPENPALM": "OPEN_PALM",
+        "FIST": "FIST",
+        "THUMBSUP": "THUMBS_UP",
+        "THUMBSDOWN": "THUMBS_DOWN",
+        "PINCH": "PINCH",
+    }
+    return labels.get(token)
+
+
+def get_mode_actions(mode: str) -> dict[str, str]:
+    mode_map = {
+        "PowerPoint": {
+            "OPEN_PALM": "space",
+            "THUMBS_UP": "next_slide",
+            "THUMBS_DOWN": "previous_slide",
+            "PINCH": "left_click",
+            "FIST": "disable_control",
+        },
+        "Chrome": {
+            "OPEN_PALM": "space",
+            "THUMBS_UP": "right_arrow",
+            "THUMBS_DOWN": "left_arrow",
+            "PINCH": "left_click",
+            "FIST": "disable_control",
+        },
+        "PDF": {
+            "OPEN_PALM": "space",
+            "THUMBS_UP": "page_down",
+            "THUMBS_DOWN": "page_up",
+            "PINCH": "left_click",
+            "FIST": "disable_control",
+        },
+    }
+    return mode_map.get(mode, mode_map["PowerPoint"])
+
+
+def execute_stable_gesture(gesture_label: str, mode: str) -> None:
+    canonical_gesture = normalize_gesture(gesture_label)
+    if canonical_gesture is None:
         return
 
     now = monotonic()
-    state = st.session_state["dynamic_collection_state"]
-    label = st.session_state["dynamic_collection_label"]
-    target = st.session_state["dynamic_collection_target"]
-    current = st.session_state["dynamic_collection_current"]
-    elapsed = now - st.session_state["dynamic_collection_state_started"]
-    progress_display.progress(current / target)
-
-    if state == "pause":
-        status_display.info(f"Preparing Sequence {current + 1}/{target}...")
-        if elapsed >= DYNAMIC_COLLECTION_PAUSE_SECONDS:
-            st.session_state["dynamic_collection_state"] = "countdown"
-            st.session_state["dynamic_collection_state_started"] = now
+    st.session_state["gesture_event_debug"] = ""
+    if st.session_state.get("runtime_control_blocked", False):
+        st.session_state["action_status"] = "Control Disabled — Fist detected"
         return
 
-    if state == "countdown":
-        countdown = max(1, 3 - int(elapsed))
-        status_display.info(f"Get Ready... {countdown}")
-        if elapsed >= 3.0:
-            st.session_state["dynamic_collection_state"] = "recording"
-            st.session_state["dynamic_collection_state_started"] = now
-            st.session_state["dynamic_collection_recording_started"] = now
-            st.session_state["dynamic_collection_frames"] = []
-            st.session_state["dynamic_collection_total_frames"] = 0
+    mode_map = get_mode_actions(mode)
+    action_name = mode_map.get(canonical_gesture)
+    if not action_name or action_name == "noop":
+        st.session_state["action_status"] = "Ready"
         return
 
-    ret, frame = camera.read()
-    if not ret:
-        status_display.error("Camera stopped providing frames. Collection stopped safely.")
-        reset_dynamic_collection()
-        return
-    landmarks, annotated, _ = get_hand_detector().detect(frame)
-    preview_display.image(annotated, channels="BGR")
-    recording_elapsed = now - st.session_state["dynamic_collection_recording_started"]
-    frames = st.session_state["dynamic_collection_frames"]
-    total_frames = st.session_state.get("dynamic_collection_total_frames", 0) + 1
-    st.session_state["dynamic_collection_total_frames"] = total_frames
-    if landmarks is not None:
-        frames.append(np.asarray([[point.x, point.y, point.z] for point in landmarks.landmark], dtype=np.float32))
-
-    status_display.info(
-        f"RECORDING - Perform {label.replace('_', ' ').title()} | "
-        f"Time: {min(recording_elapsed, DYNAMIC_COLLECTION_DURATION_SECONDS):.1f} / "
-        f"{DYNAMIC_COLLECTION_DURATION_SECONDS:.1f}s | Valid frames: {len(frames)} | Total frames: {total_frames} | "
-        f"Hand: {'Detected' if landmarks is not None else 'Not detected'}"
-    )
-    if recording_elapsed < DYNAMIC_COLLECTION_DURATION_SECONDS:
+    if canonical_gesture == "FIST":
+        st.session_state["runtime_control_blocked"] = True
+        st.session_state["action_status"] = "Control Disabled — Fist detected"
+        st.session_state["last_action_time"] = now
+        st.session_state["last_action_gesture"] = "fist"
+        st.session_state["last_action_until"] = now + 1.0
         return
 
-    if len(frames) < DYNAMIC_MIN_VALID_FRAMES:
-        status_display.warning(
-            f"Insufficient hand frames — captured {len(frames)} valid frames out of {total_frames}. Retrying."
+    if not st.session_state.get("computer_control", False):
+        st.session_state["action_status"] = (
+            f"Gesture recognized, action not triggered — Computer Control OFF; "
+            f"mapped action: {action_name.upper()}"
         )
-        st.session_state["dynamic_collection_state"] = "pause"
-        st.session_state["dynamic_collection_state_started"] = now
-        st.session_state["dynamic_collection_frames"] = []
-        st.session_state["dynamic_collection_total_frames"] = 0
+        st.session_state["gesture_event_debug"] = ""
         return
 
-    DynamicSequenceDataset().add_sequence(label, np.asarray(frames, dtype=np.float32))
-    current += 1
-    st.session_state["dynamic_collection_current"] = current
-    st.session_state["dynamic_collection_frames"] = []
-    st.session_state["dynamic_collection_total_frames"] = 0
-    status_display.success(f"Sequence {current}/{target} captured - {len(frames)} valid frames saved")
-    if current >= target:
-        status_display.success(f"{label.replace('_', ' ').title()} collection complete.")
-        reset_dynamic_collection()
-    else:
-        st.session_state["dynamic_collection_state"] = "pause"
-        st.session_state["dynamic_collection_state_started"] = now
+    st.session_state["gesture_event_debug"] = ""
+
+    if canonical_gesture == "PINCH":
+        if st.session_state.get("pinch_active", False):
+            return
+        st.session_state["pinch_active"] = True
+        if now - st.session_state.get("last_action_time", 0.0) < 0.5:
+            return
+        result = get_action_manager().execute(action_name)
+        st.session_state["action_status"] = result["message"]
+        st.session_state["last_action_time"] = now
+        st.session_state["last_action_gesture"] = "PINCH"
+        st.session_state["last_action_until"] = now + 1.0
+        return
+
+    result = get_action_manager().execute(action_name)
+    st.session_state["action_status"] = (
+        f"✓ {result['message']}" if result["status"] == "success" else
+        f"Gesture recognized, action not triggered — {result['message']}"
+    )
+    st.session_state["last_action_time"] = now
+    st.session_state["last_action_gesture"] = canonical_gesture
+    st.session_state["last_action_until"] = now + 1.0
+    if action_name in {"next_slide", "previous_slide"}:
+        event_lines = [
+            "GESTURE EVENT",
+            f"Gesture: {canonical_gesture}",
+            f"Action: {action_name.upper()}",
+            f"Controller: {result.get('controller', action_name + '()')}",
+            f"PowerPoint: {result.get('powerpoint', 'UNKNOWN')}",
+            f"Focus: {result.get('focus', 'UNKNOWN')}",
+            f"Key: {result.get('key', 'UNKNOWN')}",
+            f"Result: {result.get('result', 'NOT SENT')}",
+        ]
+        st.session_state["gesture_event_debug"] = "\n".join(event_lines)
+        print("\n".join(event_lines))
 
 
-@st.fragment(run_every="200ms")
-def render_live_frame(
-    frame_placeholder: Any,
-    gesture_display: Any,
-    confidence_display: Any,
-    context_display: Any,
-    intent_display: Any,
-    action_display: Any,
-    dynamic_display: Any,
-    dynamic_confidence_display: Any,
-    debug_display: Any,
-) -> None:
-    """Read and render one frame while the user has explicitly enabled the camera."""
+def get_stable_prediction(history: List[str]) -> str | None:
+    if len(history) < 5:
+        return None
+    counts = Counter(history)
+    top_label, top_count = counts.most_common(1)[0]
+    if top_count / len(history) >= 0.6:
+        return top_label
+    return None
+
+
+def is_new_stable_gesture(current: str | None, previous: str | None) -> bool:
+    return current is not None and current != previous
+
+
+@st.fragment(run_every="150ms")
+def render_live_frame(frame_placeholder: Any, gesture_display: Any, confidence_display: Any, context_display: Any, action_status_display: Any, debug_display: Any) -> None:
     if st.session_state.get("dynamic_collection_active"):
         return
+
     camera = st.session_state.get("camera")
     if camera is None or not st.session_state.get("camera_running"):
         return
 
     ret, frame = camera.read()
     if not ret:
-        st.error("Camera could not provide a frame. Check the connection and permissions.")
+        st.error("Camera could not provide a frame.")
         stop_camera()
         return
 
     detector = get_hand_detector()
     hand_landmarks, annotated, status = detector.detect(frame)
-    temporal_detector = get_temporal_swipe_detector()
-    current_time = monotonic()
-    hand_center = compute_hand_center_xy(hand_landmarks)
-    if hand_center is not None:
-        hand_center_x, hand_center_y = hand_center
-    else:
-        hand_center_x, hand_center_y = None, None
-    temporal_result = temporal_detector.update(
-        hand_center_x,
-        current_time,
-        hand_present=hand_landmarks is not None,
-        y_value=hand_center_y,
-    )
-    dynamic_label = temporal_result.get("gesture")
-    current_dynamic_x = temporal_result.get("current_x")
-    current_dynamic_start_x = temporal_result.get("start_x")
-    current_dynamic_displacement = temporal_result.get("displacement")
-    current_dynamic_direction = temporal_result.get("direction")
-    current_dynamic_state = temporal_result.get("state")
-    current_dynamic_elapsed = temporal_result.get("elapsed")
-    current_dynamic_cooldown = temporal_result.get("cooldown")
-    detection_reason = temporal_result.get("reason", "Waiting for more horizontal movement")
-
-    display_until = st.session_state.get("last_dynamic_until", 0.0)
-    if dynamic_label is not None:
-        st.session_state["last_dynamic_gesture"] = dynamic_label
-        st.session_state["last_dynamic_until"] = current_time + 1.2
-        st.session_state["last_dynamic_confidence"] = 1.0
-    if current_time < display_until and st.session_state.get("last_dynamic_gesture") is not None:
-        displayed_dynamic_label = st.session_state.get("last_dynamic_gesture")
-        displayed_dynamic_confidence = st.session_state.get("last_dynamic_confidence", 1.0)
-    else:
-        displayed_dynamic_label = None
-        displayed_dynamic_confidence = None
-        st.session_state.pop("last_dynamic_gesture", None)
-        st.session_state.pop("last_dynamic_confidence", None)
-
-    if displayed_dynamic_label is not None:
-        dynamic_display.markdown(f"<h3>{displayed_dynamic_label.replace('_', ' ').upper()}</h3>", unsafe_allow_html=True)
-        dynamic_confidence_display.markdown(f"<p>Confidence: {displayed_dynamic_confidence * 100:.0f}%</p>", unsafe_allow_html=True)
-    else:
-        dynamic_display.markdown("<h3>—</h3>", unsafe_allow_html=True)
-        dynamic_confidence_display.markdown("<p>Confidence: --</p>", unsafe_allow_html=True)
-
-    debug_display.write(
-        {
-            "hand": "Detected" if hand_landmarks is not None else "Not detected",
-            "trajectory_samples": len(temporal_detector.trajectory),
-            "start_x": round(float(current_dynamic_start_x), 3) if current_dynamic_start_x is not None else None,
-            "current_x": round(float(current_dynamic_x), 3) if current_dynamic_x is not None else None,
-            "displacement_x": round(float(current_dynamic_displacement), 3) if current_dynamic_displacement is not None else 0.0,
-            "direction": current_dynamic_direction or "idle",
-            "state": current_dynamic_state or "IDLE",
-            "elapsed_time": round(float(current_dynamic_elapsed), 2) if current_dynamic_elapsed is not None else 0.0,
-            "dynamic_gesture": displayed_dynamic_label.replace('_', ' ').upper() if displayed_dynamic_label else "None",
-            "cooldown": f"{round(float(current_dynamic_cooldown), 2)} s" if current_dynamic_cooldown else "Ready",
-            "reason": detection_reason,
-        }
-    )
-
-    if hand_landmarks is not None and MODEL_PATH.exists():
-        try:
-            features = extract_feature_vector(hand_landmarks, frame.shape)
-            prediction = get_predictor().predict(features)
-            gesture_name = str(prediction["label"])
-            confidence = float(prediction["confidence"])
-            gesture_display.markdown(f"<h3>{gesture_name.replace('_', ' ').upper()}</h3>", unsafe_allow_html=True)
-            confidence_display.markdown(f"<h3>{confidence * 100:.2f}%</h3>", unsafe_allow_html=True)
-            context_display.markdown("<p>Unknown</p>", unsafe_allow_html=True)
-            if displayed_dynamic_label == "swipe_right":
-                intent_display.markdown("<p>Swipe Right</p>", unsafe_allow_html=True)
-                action_display.markdown("<p>Detection only</p>", unsafe_allow_html=True)
-            elif displayed_dynamic_label == "swipe_left":
-                intent_display.markdown("<p>Swipe Left</p>", unsafe_allow_html=True)
-                action_display.markdown("<p>Detection only</p>", unsafe_allow_html=True)
-            else:
-                intent_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-                action_display.markdown("<p>Detection only</p>", unsafe_allow_html=True)
-        except Exception as exc:
-            gesture_display.markdown("<h3>Prediction unavailable</h3>", unsafe_allow_html=True)
-            confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-            context_display.markdown("<p>Unknown</p>", unsafe_allow_html=True)
-            intent_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-            action_display.markdown("<p>Detection only</p>", unsafe_allow_html=True)
-            st.warning(f"Prediction failed: {exc}")
-    elif hand_landmarks is not None:
-        gesture_display.markdown("<h3>MODEL NOT TRAINED</h3>", unsafe_allow_html=True)
-        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-        context_display.markdown("<p>Not detected</p>", unsafe_allow_html=True)
-        intent_display.markdown("<p>Train the model first</p>", unsafe_allow_html=True)
-        action_display.markdown("<p>Detection only</p>", unsafe_allow_html=True)
-    else:
+    if hand_landmarks is None:
+        st.session_state["gesture_history"] = []
+        st.session_state["last_stable_gesture"] = None
+        st.session_state["last_processed_gesture"] = None
+        st.session_state["gesture_event_debug"] = ""
         gesture_display.markdown("<h3>No Hand</h3>", unsafe_allow_html=True)
         confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
         context_display.markdown("<p>Not detected</p>", unsafe_allow_html=True)
-        intent_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-        action_display.markdown("<p>Detection only</p>", unsafe_allow_html=True)
+        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+        debug_display.code(
+            "Raw prediction: --\nNormalized gesture: --\nConfidence: --\n"
+            "Stable gesture: --\nMapped action: --"
+        )
+        st.session_state["pinch_active"] = False
+        return
+
+    try:
+        features = extract_feature_vector(hand_landmarks, frame.shape)
+        prediction = get_predictor().predict(features)
+    except Exception:
+        gesture_display.markdown("<h3>Prediction unavailable</h3>", unsafe_allow_html=True)
+        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
+        context_display.markdown("<p>Model not ready</p>", unsafe_allow_html=True)
+        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+        return
+
+    raw_prediction = prediction["label"]
+    gesture_name = normalize_gesture(raw_prediction)
+    confidence = float(prediction["confidence"])
+    history = st.session_state.get("gesture_history", [])
+    if gesture_name is None:
+        history = []
+    else:
+        history.append(gesture_name)
+    if len(history) > 8:
+        history = history[-8:]
+    st.session_state["gesture_history"] = history
+
+    current_stable = get_stable_prediction(history)
+    st.session_state["last_stable_gesture"] = current_stable
+
+    if current_stable is not None:
+        gesture_display.markdown(f"<h3>{current_stable.replace('_', ' ').title()}</h3>", unsafe_allow_html=True)
+    else:
+        display_gesture = gesture_name.replace("_", " ").title() if gesture_name else "Unrecognized"
+        gesture_display.markdown(f"<h3>{display_gesture}</h3>", unsafe_allow_html=True)
+    confidence_display.markdown(f"<h3>{confidence * 100:.2f}%</h3>", unsafe_allow_html=True)
+    context_display.markdown(f"<p>{'Gesture Stable' if current_stable is not None else 'Waiting for stability'}</p>", unsafe_allow_html=True)
+
+    mode_map = get_mode_actions(st.session_state.get("app_mode", "PowerPoint"))
+    trace_gesture = current_stable or gesture_name
+    trace_action = mode_map.get(trace_gesture, "--") if trace_gesture else "--"
+    debug_display.code(
+        f"Raw prediction: {raw_prediction!r}\n"
+        f"Normalized gesture: {gesture_name or '--'}\n"
+        f"Confidence: {confidence:.4f}\n"
+        f"Stable gesture: {current_stable or '--'}\n"
+        f"Mapped action: {trace_action.upper()}"
+    )
+
+    if is_new_stable_gesture(current_stable, st.session_state.get("last_processed_gesture")):
+        execute_stable_gesture(current_stable, st.session_state.get("app_mode", "PowerPoint"))
+        st.session_state["last_processed_gesture"] = current_stable
+    elif current_stable is None:
+        st.session_state["last_processed_gesture"] = None
+        st.session_state["pinch_active"] = False
+
+    if current_stable in {"OPEN_PALM", "FIST", "THUMBS_UP", "THUMBS_DOWN", "PINCH"}:
+        action_status_display.markdown(f"<p>{st.session_state.get('action_status', 'Waiting for gesture')}</p>", unsafe_allow_html=True)
+    else:
+        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+
+    if st.session_state.get("runtime_control_blocked", False):
+        st.session_state["pinch_active"] = False
+
+    if st.session_state.get("gesture_event_debug"):
+        debug_display.code(
+            f"Raw prediction: {raw_prediction!r}\n"
+            f"Normalized gesture: {gesture_name or '--'}\n"
+            f"Confidence: {confidence:.4f}\n"
+            f"Stable gesture: {current_stable or '--'}\n"
+            f"Mapped action: {trace_action.upper()}\n\n"
+            f"{st.session_state['gesture_event_debug']}"
+        )
 
     cv2.putText(annotated, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    if dynamic_label is not None:
-        cv2.putText(annotated, dynamic_label.replace('_', ' ').upper(), (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 212, 255), 2)
+    if current_stable is not None:
+        cv2.putText(annotated, current_stable.replace('_', ' ').upper(), (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 212, 255), 2)
     frame_placeholder.image(annotated, channels="BGR")
 
 
-def safe_metric(value: float) -> float:
-    return float(value) if value is not None else 0.0
+def dataset_status(dataset: GestureDataset) -> str:
+    errors = dataset.validate()
+    if not dataset.dataset_path.exists() or dataset.load().empty:
+        return "Empty"
+    return "Available" if not errors else "Needs More Data"
 
 
 def main() -> None:
+    ensure_session_state()
+
+    if not st.session_state.get("intro_done", False):
+        render_intro_video()
+        return
+
     st.markdown(
         """
         <style>
@@ -407,39 +445,29 @@ def main() -> None:
             font-family: 'Inter', Arial, sans-serif;
         }
         .block-container {
-            padding-top: 1.5rem;
-            padding-bottom: 1.5rem;
-        }
-        div[data-testid="stMetric"] {
-            background: var(--card);
-            border: 1px solid rgba(148, 163, 184, 0.15);
-            border-radius: 0.8rem;
-            padding: 1rem;
-        }
-        .stTabs [role="tablist"] button {
-            background: var(--card);
-            color: var(--text);
-        }
-        .stTabs [role="tablist"] [aria-selected="true"] {
-            border-bottom: 2px solid var(--primary);
-        }
-        .stButton > button {
-            background: var(--surface);
-            color: var(--text);
-            border: 1px solid var(--primary);
-            border-radius: 0.5rem;
-            font-weight: 600;
-        }
-        .stProgress > div > div {
-            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            padding-top: 1.2rem;
+            padding-bottom: 1.2rem;
         }
         .status-pill {
             background: var(--card);
             border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 0.5rem;
+            border-radius: 0.85rem;
             color: var(--text);
-            padding: 0.65rem 0.8rem;
+            padding: 0.75rem 0.9rem;
             margin-bottom: 0.5rem;
+        }
+        .stButton > button {
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid rgba(0,212,255,0.45);
+            border-radius: 0.5rem;
+            font-weight: 600;
+        }
+        .card {
+            background: rgba(17, 24, 39, 0.9);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 1rem;
+            padding: 1rem;
         }
         </style>
         """,
@@ -447,266 +475,151 @@ def main() -> None:
     )
 
     st.title("GestureAI")
-    st.caption("AI-Powered Personalized Gesture Control")
+    st.caption("Move naturally, control digitally.")
 
-    dataset = load_or_create_dataset()
     status_col1, status_col2, status_col3 = st.columns(3)
     with status_col1:
-        render_status("Camera", camera_status(), "#22C55E" if st.session_state.get("camera_running") else "#94A3B8")
+        render_status("Camera", "Ready" if st.session_state.get("camera_running") else "Not Connected", "#22C55E" if st.session_state.get("camera_running") else "#94A3B8")
     with status_col2:
         render_status("Model", model_status(), "#00D4FF" if MODEL_PATH.exists() else "#94A3B8")
     with status_col3:
-        render_status("Recognition", "Ready" if MODEL_PATH.exists() else "Waiting", "#22C55E" if MODEL_PATH.exists() else "#F59E0B")
-
-    tabs = st.tabs(["Live Control", "Teach Gesture", "Experimental / Dataset Lab", "Model Performance", "Gesture History", "Settings"])
-
-    with tabs[0]:
-        left, right = st.columns([1.6, 1])
-        with left:
-            st.subheader("Live Camera Feed")
-            frame_placeholder = st.empty()
-            if st.session_state.get("camera_running"):
-                if st.button("Stop Camera", key="stop_live_camera"):
-                    stop_camera()
-                    st.rerun()
-            else:
-                if st.button("Start Camera", key="start_live_camera"):
-                    camera = cv2.VideoCapture(0)
-                    if not camera.isOpened():
-                        camera.release()
-                        st.error("Camera could not be accessed. Check camera permissions or whether another application is using it.")
-                    else:
-                        st.session_state["camera"] = camera
-                        st.session_state["camera_running"] = True
-                        st.rerun()
-
-        with right:
-            st.subheader("Prediction Panel")
-            st.markdown("### Detected Gesture")
-            gesture_display = st.empty()
-            st.markdown("### Confidence")
-            confidence_display = st.empty()
-            st.markdown("### Context")
-            context_display = st.empty()
-            st.markdown("### Intent")
-            intent_display = st.empty()
-            st.markdown("### Action")
-            action_display = st.empty()
-            st.markdown("### Dynamic Gesture")
-            dynamic_display = st.empty()
-            dynamic_confidence_display = st.empty()
-            with st.expander("Temporal debug", expanded=False):
-                debug_display = st.empty()
-
-        metric_cols = st.columns(4)
-        evaluation = GestureEvaluator().summary()
-        accuracy = evaluation.get("accuracy") if evaluation.get("status") == "ready" else None
-        metric_cols[0].metric("Model Accuracy", f"{accuracy * 100:.1f}%" if accuracy is not None else "--")
-        metric_cols[1].metric("Gestures Available", str(len(parse_dataset_for_ui())))
-        metric_cols[2].metric("Custom Gestures", str(max(0, len(parse_dataset_for_ui()) - len(DEFAULT_GESTURES))))
-        metric_cols[3].metric("Current FPS", "--")
-        if st.session_state.get("camera_running"):
-            render_live_frame(
-                frame_placeholder,
-                gesture_display,
-                confidence_display,
-                context_display,
-                intent_display,
-                action_display,
-                dynamic_display,
-                dynamic_confidence_display,
-                debug_display,
-            )
+        if st.session_state.get("runtime_control_blocked"):
+            control_value = "BLOCKED"
+            control_color = "#F59E0B"
         else:
-            frame_placeholder.info("Camera is not connected. Select Start Camera to begin.")
-            gesture_display.markdown("<h3>Waiting...</h3>", unsafe_allow_html=True)
-            confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-            context_display.markdown("<p>Not detected</p>", unsafe_allow_html=True)
-            intent_display.markdown("<p>Waiting</p>", unsafe_allow_html=True)
-            action_display.markdown("<p>Waiting</p>", unsafe_allow_html=True)
-            dynamic_display.markdown("<h3>NONE</h3>", unsafe_allow_html=True)
-            dynamic_confidence_display.markdown("<p>Confidence: --</p>", unsafe_allow_html=True)
-            debug_display.write(
-                {
-                    "hand": "Not detected",
-                    "temporal_buffer_frames": 0,
-                    "dynamic_gesture": "None",
-                    "movement": "-",
-                    "horizontal_displacement": 0.0,
-                    "vertical_displacement": 0.0,
-                    "cooldown": "Ready",
-                }
-            )
+            control_value = "ON" if st.session_state.get("computer_control") else "OFF"
+            control_color = "#22C55E" if st.session_state.get("computer_control") else "#F59E0B"
+        render_status("Control", control_value, control_color)
 
-    with tabs[1]:
-        st.subheader("Teach Your Own Gesture")
-        st.info("How it works: perform the gesture in front of your camera. GestureAI captures hand landmarks and converts them into ML training features automatically. You do not need to create CSV files manually.")
-        gesture_name = st.text_input("Gesture name", placeholder="Example: Open Calculator")
-        sample_count = st.slider("Number of samples", min_value=10, max_value=100, value=100)
-        collect_button = st.button("Start Collection")
-        if collect_button:
-            if not gesture_name.strip():
-                st.error("Please enter a valid gesture name.")
+    st.subheader("Application Mode")
+    mode = st.selectbox("Select mode", ["PowerPoint"], index=0, key="app_mode")
+
+    if mode == "PowerPoint":
+        st.subheader("POWERPOINT CONTROL")
+        powerpoint_status = "Launched" if st.session_state["powerpoint_launched"] else "Not Running"
+        st.markdown(f"**PowerPoint Status:** {powerpoint_status}")
+        if st.button("Launch PowerPoint", key="launch_powerpoint_button"):
+            launch_status, launch_message = launch_powerpoint()
+            st.session_state["powerpoint_launched"] = launch_status == "launched"
+            st.session_state["powerpoint_launch_message"] = launch_message
+            st.rerun()
+        if st.session_state.get("powerpoint_launch_message"):
+            if st.session_state["powerpoint_launched"]:
+                st.success(st.session_state["powerpoint_launch_message"])
             else:
-                st.session_state["gesture_label"] = gesture_name.strip()
-                st.session_state["samples_target"] = sample_count
-                st.session_state["samples_collected"] = 0
-                st.session_state["collector_ready"] = True
-                st.success(f"Collection started for '{gesture_name}'.")
-
-        if st.session_state.get("collector_ready"):
-            detector = get_hand_detector()
-            camera = cv2.VideoCapture(0)
-            progress_bar = st.progress(0)
-            sample_counter = st.empty()
-            try:
-                collected = []
-                while st.session_state["samples_collected"] < st.session_state["samples_target"]:
-                    ret, frame = camera.read()
-                    if not ret:
-                        st.warning("Unable to read camera while collecting samples.")
-                        break
-                    hand_landmarks, annotated, _ = detector.detect(frame)
-                    if hand_landmarks is not None:
-                        features = extract_feature_vector(hand_landmarks, frame.shape)
-                        collected.append(features)
-                        st.session_state["samples_collected"] = len(collected)
-                        sample_counter.markdown(f"Samples collected: {len(collected)} / {st.session_state['samples_target']}")
-                        progress_bar.progress(len(collected) / st.session_state["samples_target"])
-                        cv2.imshow("Collection Preview", annotated)
-                        key = cv2.waitKey(1) & 0xFF
-                        if key == ord("q"):
-                            break
-                    time.sleep(0.05)
-
-                if collected:
-                    dataset = GestureDataset(DATASET_PATH)
-                    for feature_vector in collected:
-                        dataset.append_sample(st.session_state["gesture_label"], feature_vector)
-                    st.success(f"Collected {len(collected)} samples for '{st.session_state['gesture_label']}'.")
-                    st.session_state["collector_ready"] = False
-                    st.session_state["samples_collected"] = 0
-            except Exception as exc:
-                st.error(f"Collection failed: {exc}")
-            finally:
-                camera.release()
-                cv2.destroyAllWindows()
-
-        train_button = st.button("Train Model")
-        if train_button:
-            try:
-                dataset_manager = load_or_create_dataset()
-                validation_errors = dataset_manager.validate()
-                if validation_errors:
-                    st.warning("Training cannot start yet.")
-                    for error in validation_errors:
-                        st.write(f"- {error}")
-                else:
-                    evaluation = get_trainer().train(dataset_manager.load())
-                    st.success("Training complete. Metrics below are measured on the held-out test split.")
-                    st.json(evaluation)
-            except Exception as exc:
-                st.error(f"Training failed: {exc}")
-
-    with tabs[2]:
-        st.subheader("Experimental / Dataset Lab")
-        st.info("This lab is optional and not required for live control. Real-time swipe recognition uses the deterministic temporal detector immediately after the camera starts.")
-        dynamic_label = st.selectbox("Select dynamic gesture", DYNAMIC_CLASSES, format_func=lambda value: value.replace("_", " ").title())
-        st.caption(
-            f"Use an open palm. For Swipe Left, start on the RIGHT side and move toward the LEFT. "
-            f"For Swipe Right, start on the LEFT side and move toward the RIGHT. "
-            f"Each sequence records for {DYNAMIC_COLLECTION_DURATION_SECONDS:.1f} seconds automatically."
+                st.warning(st.session_state["powerpoint_launch_message"])
+        test_next_col, test_previous_col = st.columns(2)
+        with test_next_col:
+            if st.button("TEST NEXT SLIDE", key="test_next_slide_button"):
+                execute_stable_gesture("THUMBS_UP", mode)
+        with test_previous_col:
+            if st.button("TEST PREVIOUS SLIDE", key="test_previous_slide_button"):
+                execute_stable_gesture("THUMBS_DOWN", mode)
+        if st.session_state.get("action_status", "").startswith("Gesture recognized, action not triggered"):
+            st.warning(st.session_state["action_status"])
+        elif st.session_state.get("gesture_event_debug"):
+            st.code(st.session_state["gesture_event_debug"])
+        st.markdown(
+            "**Instructions**\n\n"
+            "1. Open your presentation\n"
+            "2. Start Slide Show\n"
+            "3. Start Camera\n"
+            "4. Enable Computer Control"
         )
-        sequence_count = st.selectbox("Number of sequences", DYNAMIC_COLLECTION_COUNT_OPTIONS, index=1)
-        dynamic_counts = DynamicSequenceDataset().counts()
-        st.write({"Swipe Left": dynamic_counts["swipe_left"], "Swipe Right": dynamic_counts["swipe_right"], "Total": sum(dynamic_counts.values())})
-        collect_dynamic_button = st.button("Start Dynamic Collection")
-        if collect_dynamic_button:
-            try:
-                start_dynamic_collection(dynamic_label, int(sequence_count))
+
+    control_enabled = st.toggle("Computer Control", key="computer_control")
+
+    if not control_enabled:
+        st.session_state["runtime_control_blocked"] = False
+        st.info("Control is OFF. Gesture recognition is still active, but no computer actions will execute.")
+    else:
+        st.session_state["runtime_control_blocked"] = st.session_state.get("runtime_control_blocked", False)
+
+    left_col, right_col = st.columns([1.7, 1])
+
+    with left_col:
+        st.subheader("Live Camera")
+        frame_placeholder = st.empty()
+        if st.session_state.get("camera_running"):
+            if st.button("Stop Camera", key="stop_camera_button"):
+                stop_camera()
                 st.rerun()
-            except Exception as exc:
-                st.error(f"Dynamic collection failed: {exc}")
-
-        if st.session_state.get("dynamic_collection_active"):
-            collection_preview = st.empty()
-            collection_progress = st.progress(
-                st.session_state.get("dynamic_collection_current", 0)
-                / st.session_state.get("dynamic_collection_target", 1)
-            )
-            collection_status = st.empty()
-            render_dynamic_collection(collection_preview, collection_progress, collection_status)
-
-        train_dynamic_button = st.button("Train Dynamic Model")
-        if train_dynamic_button:
-            try:
-                dynamic_dataset = DynamicSequenceDataset()
-                errors = dynamic_dataset.validate()
-                if errors:
-                    st.warning("Dynamic training cannot start yet.")
-                    for error in errors:
-                        st.write(f"- {error}")
+        else:
+            if st.button("Start Camera", key="start_camera_button"):
+                camera = cv2.VideoCapture(0)
+                if not camera.isOpened():
+                    st.error("Camera could not be accessed. Check permissions or another app using it.")
                 else:
-                    sequences, labels = dynamic_dataset.load_sequences()
-                    evaluation = DynamicGestureTrainer().train(sequences, labels)
-                    st.success("Dynamic model training complete. Metrics are from the held-out test split.")
-                    st.json(evaluation)
-                    get_dynamic_predictor.clear()
-            except Exception as exc:
-                st.error(f"Dynamic training failed: {exc}")
+                    st.session_state["camera"] = camera
+                    st.session_state["camera_running"] = True
+                    st.rerun()
 
-    with tabs[3]:
-        st.subheader("Model Performance")
-        evaluator = GestureEvaluator()
-        metrics = evaluator.summary()
-        if metrics.get("status") == "ready":
-            st.metric("Accuracy", f"{metrics['accuracy'] * 100:.2f}%")
-            st.metric("Precision", f"{metrics['precision'] * 100:.2f}%")
-            st.metric("Recall", f"{metrics['recall'] * 100:.2f}%")
-            st.metric("F1 Score", f"{metrics['f1_score'] * 100:.2f}%")
-            st.write("Confusion Matrix")
-            st.dataframe(np.asarray(metrics.get("confusion_matrix", [])))
-        else:
-            st.warning(metrics.get("message", "No evaluation available yet."))
+    with right_col:
+        st.subheader("Recognition")
+        st.markdown("### Current Gesture")
+        gesture_display = st.empty()
+        st.markdown("### Confidence")
+        confidence_display = st.empty()
+        st.markdown("### Status")
+        context_display = st.empty()
+        st.markdown("### Action")
+        action_status_display = st.empty()
+        debug_display = st.empty()
 
-        if DYNAMIC_EVALUATION_PATH.exists():
-            st.subheader("Dynamic Model Performance")
-            with open(DYNAMIC_EVALUATION_PATH, "r", encoding="utf-8") as file:
-                st.json(json.load(file))
-        else:
-            st.info("No dynamic model evaluation available yet.")
+    st.subheader("PowerPoint Mapping")
+    mapping_cols = st.columns(5)
+    gestures = [
+        ("Open Palm", "Space / Play-Pause"),
+        ("Fist", "Disable Control"),
+        ("Thumbs Up", "Next Slide"),
+        ("Thumbs Down", "Previous Slide"),
+        ("Pinch", "Mouse Click"),
+    ]
+    for idx, (label, action) in enumerate(gestures):
+        with mapping_cols[idx]:
+            st.markdown(
+                f"<div class='card'><strong>{label}</strong><br><span style='color:#94A3B8;'>{action}</span></div>",
+                unsafe_allow_html=True,
+            )
 
-    with tabs[4]:
-        st.subheader("Gesture History")
-        history = st.session_state.get("history", [])
-        if history:
-            st.dataframe(history)
-            if st.button("Clear History"):
-                st.session_state["history"] = []
-                st.success("History cleared.")
-        else:
-            st.info("No recognition events yet.")
+    if st.session_state.get("camera_running"):
+        render_live_frame(frame_placeholder, gesture_display, confidence_display, context_display, action_status_display, debug_display)
+    else:
+        frame_placeholder.info("Camera is not connected. Start the camera to begin recognition.")
+        gesture_display.markdown("<h3>Waiting...</h3>", unsafe_allow_html=True)
+        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
+        context_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+        debug_display.code("Raw prediction: --\nNormalized gesture: --\nConfidence: --\nStable gesture: --\nMapped action: --")
 
-    with tabs[5]:
-        st.subheader("System Status")
-        current_dataset = load_or_create_dataset()
-        status_items = [
-            ("Camera Status", camera_status(), "Camera is ready only after Start Camera is selected."),
-            ("Model Status", model_status(), "Collect gesture data and train the model to enable recognition."),
-            ("Dataset Status", dataset_status(current_dataset), "Samples are collected through the webcam Teach Gesture workflow."),
-            ("Available Gestures", str(len(DEFAULT_GESTURES)), "Static gesture classes configured for the initial model."),
-            ("Custom Gestures", str(max(0, len(parse_dataset_for_ui()) - len(DEFAULT_GESTURES))), "Additional labels collected beyond the initial static classes."),
-            ("Model Version", MODEL_VERSION, "Current static Random Forest model format."),
-            ("Last Training Status", "Successful" if EVALUATION_PATH.exists() else "Not trained", "Only saved evaluation results are shown."),
-        ]
-        for index in range(0, len(status_items), 2):
-            columns = st.columns(2)
-            for column, (label, value, detail) in zip(columns, status_items[index:index + 2]):
-                with column:
-                    st.markdown(
-                        f"<div class='status-pill'><strong>{label}</strong><br><span style='font-size:1.2rem;'>{value}</span><br><small style='color:#94A3B8;'>{detail}</small></div>",
-                        unsafe_allow_html=True,
-                    )
+    st.subheader("System Status")
+    dataset = load_or_create_dataset()
+    system_cols = st.columns(3)
+    with system_cols[0]:
+        st.metric("Camera", camera_status())
+    with system_cols[1]:
+        st.metric("Model", model_status())
+    with system_cols[2]:
+        st.metric("Dataset", dataset_status(dataset))
+
+    if st.button("Disable Control", key="disable_control_button"):
+        st.session_state["runtime_control_blocked"] = True
+        st.session_state["action_status"] = "Control blocked — disabled"
+        st.rerun()
+
+    if st.button("Train Model", key="train_model_button"):
+        try:
+            trainer = get_trainer()
+            dataset_manager = load_or_create_dataset()
+            validation_errors = dataset_manager.validate()
+            if validation_errors:
+                st.warning("Training cannot start yet. Please collect enough samples.")
+            else:
+                evaluation = trainer.train(dataset_manager.load())
+                st.success("Training complete.")
+                st.json(evaluation)
+        except Exception as exc:
+            st.error(f"Training failed: {exc}")
 
 
 if __name__ == "__main__":

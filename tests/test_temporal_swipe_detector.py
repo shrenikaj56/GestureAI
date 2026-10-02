@@ -13,13 +13,29 @@ def detect_any(xs):
 
 
 def test_swipe_right_detected():
-    result = detect_any([0.20, 0.30, 0.40, 0.52, 0.66, 0.72])
+    result = detect_any([0.80, 0.72, 0.64, 0.52, 0.36, 0.28])
     assert result["gesture"] == "swipe_right"
 
 
 def test_swipe_left_detected():
-    result = detect_any([0.80, 0.68, 0.58, 0.47, 0.34, 0.27])
+    result = detect_any([0.20, 0.32, 0.42, 0.55, 0.66, 0.78])
     assert result["gesture"] == "swipe_left"
+
+
+def test_mirrored_camera_direction_is_converted_to_screen_space():
+    detector = TemporalSwipeDetector()
+    now = 0.0
+    detected = None
+    for x in [0.80, 0.72, 0.63, 0.55, 0.39, 0.28]:
+        result = detector.update(x, now, hand_present=True, y_value=0.45)
+        if result["gesture"] is not None:
+            detected = result
+            break
+        now += 0.25
+    assert detected is not None
+    assert detected["gesture"] == "swipe_right"
+    assert detected["screen_delta_x"] > 0
+    assert detected["direction"] == "right"
 
 
 def test_stationary_motion_does_not_trigger_swipe():

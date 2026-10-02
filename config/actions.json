@@ -34,6 +34,13 @@
     "scroll_up",
     "next_slide",
     "previous_slide",
-    "toggle_highlight"
+    "toggle_highlight",
+    "space",
+    "left_click",
+    "right_arrow",
+    "left_arrow",
+    "page_down",
+    "page_up",
+    "disable_control"
   ]
 }
