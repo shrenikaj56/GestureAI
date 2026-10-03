@@ -1,8 +1,0 @@
-{
-  "sequence_length": 20,
-  "feature_count": 2643,
-  "classes": [
-    "swipe_left",
-    "swipe_right"
-  ]
-}
