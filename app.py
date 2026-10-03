@@ -1,30 +1,56 @@
 from __future__ import annotations
 
-import json
-import re
-from collections import Counter
+from collections import Counter, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic
-from typing import Any, List
+from typing import Any
 
 import cv2
-import numpy as np
 import streamlit as st
 
-from src.control.action_manager import ActionManager
-from src.control.powerpoint_launcher import launch_powerpoint
-from src.ml.dataset import GestureDataset
-from src.ml.evaluator import GestureEvaluator
 from src.ml.predictor import GesturePredictor
-from src.ml.trainer import GestureTrainer
-from src.utils.config import DATASET_PATH, DEFAULT_GESTURES, EVALUATION_PATH, MODEL_PATH, MODEL_VERSION
+from src.services.ai_service import AIService, AIServiceError
 from src.vision.feature_extractor import extract_feature_vector
 from src.vision.hand_detector import HandDetector
 
-LOGO_PATH = Path(__file__).resolve().parent / "assets" / "gestureai_logo.png"
+APP_DIR = Path(__file__).resolve().parent
+LOGO_PATH = APP_DIR / "assets" / "gestureai_logo.png"
+CONFIDENCE_THRESHOLD = 0.60
+STABILIZATION_FRAMES = 3
+STABILIZATION_VOTES = 2
+ACTION_COOLDOWN_SECONDS = 0.35
 
+GESTURE_NAMES = {
+    "OPEN_PALM": "Open Palm",
+    "FIST": "Fist",
+    "THUMBS_UP": "Thumbs Up",
+    "THUMBS_DOWN": "Thumbs Down",
+    "PINCH": "Pinch",
+}
+GESTURE_ACTIONS = {
+    "OPEN_PALM": "EXPLAIN",
+    "THUMBS_UP": "DEEP DIVE",
+    "THUMBS_DOWN": "SIMPLIFY",
+    "PINCH": "EXAMPLE",
+    "FIST": "RESET",
+}
+GESTURE_ICONS = {
+    "OPEN_PALM": "✋",
+    "THUMBS_UP": "👍",
+    "THUMBS_DOWN": "👎",
+    "PINCH": "🤏",
+    "FIST": "✊",
+}
 
 st.set_page_config(page_title="GestureAI", page_icon=str(LOGO_PATH), layout="wide")
+
+
+@st.cache_resource
+def get_predictor() -> GesturePredictor:
+    predictor = GesturePredictor()
+    predictor.load()
+    return predictor
 
 
 @st.cache_resource
@@ -33,95 +59,89 @@ def get_hand_detector() -> HandDetector:
 
 
 @st.cache_resource
-def get_predictor() -> GesturePredictor:
-    return GesturePredictor()
+def get_ai_service() -> AIService:
+    return AIService()
 
 
 @st.cache_resource
-def get_trainer() -> GestureTrainer:
-    return GestureTrainer()
-
-
-@st.cache_resource
-def get_action_manager() -> ActionManager:
-    return ActionManager()
-
-
-def load_or_create_dataset() -> GestureDataset:
-    return GestureDataset(DATASET_PATH)
-
-
-def parse_dataset_for_ui() -> List[str]:
-    dataset = load_or_create_dataset().load()
-    if dataset.empty:
-        return []
-    return sorted(dataset["gesture"].dropna().unique().tolist())
+def get_ai_executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(max_workers=2, thread_name_prefix="gestureai-ai")
 
 
 def ensure_session_state() -> None:
-    st.session_state.setdefault("camera_running", False)
-    st.session_state.setdefault("camera", None)
-    st.session_state.setdefault("computer_control", False)
-    st.session_state.setdefault("runtime_control_blocked", False)
-    st.session_state.setdefault("app_mode", "PowerPoint")
-    st.session_state.setdefault("gesture_history", [])
-    st.session_state.setdefault("last_stable_gesture", None)
-    st.session_state.setdefault("action_status", "Waiting for gesture")
-    st.session_state.setdefault("last_action_time", 0.0)
-    st.session_state.setdefault("last_action_gesture", None)
-    st.session_state.setdefault("last_action_until", 0.0)
-    st.session_state.setdefault("pinch_active", False)
-    st.session_state.setdefault("last_processed_gesture", None)
-    st.session_state.setdefault("powerpoint_launched", False)
-    st.session_state.setdefault("gesture_event_debug", "")
+    defaults = {
+        "camera_enabled": False,
+        "camera_running": False,
+        "camera_capture": None,
+        "camera_initial_frame": None,
+        "camera_error": "",
+        "gesture_enabled": True,
+        "gesture_history": [],
+        "last_stable_gesture": None,
+        "active_gesture": None,
+        "gesture_confidence": 0.0,
+        "gesture_status": "Show your hand to GestureAI",
+        "gesture_count": 0,
+        "current_topic": "",
+        "current_response": "",
+        "last_action": "No action yet",
+        "last_gesture_event": "",
+        "ai_busy": False,
+        "ai_future": None,
+        "pending_ai_action": "",
+        "pending_ai_topic": "",
+        "ai_error": "",
+        "ai_connection_state": "unknown",
+        "ai_interactions": 0,
+        "last_action_at": 0.0,
+        "topic_widget_version": 0,
+        "topic_widget_key": "topic_input_0",
+        "model_load_error": "",
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
 
-def camera_status() -> str:
-    return "Connected" if st.session_state.get("camera_running", False) else "Not Connected"
+def normalize_gesture(prediction: Any) -> str | None:
+    token = "".join(character for character in str(prediction).strip().upper() if character.isalnum())
+    aliases = {
+        "OPENPALM": "OPEN_PALM",
+        "FIST": "FIST",
+        "THUMBSUP": "THUMBS_UP",
+        "THUMBSDOWN": "THUMBS_DOWN",
+        "PINCH": "PINCH",
+    }
+    return aliases.get(token)
 
 
-def model_status() -> str:
-    return "Trained" if MODEL_PATH.exists() else "Not Trained"
+def is_new_stable_gesture(current: str | None, previous: str | None) -> bool:
+    return current is not None and current != previous
 
 
-def render_status(label: str, value: str, color: str) -> None:
-    st.markdown(
-        f"<div class='status-pill'><span style='color:{color};'>●</span> {label}: {value}</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def compute_hand_center_xy(hand_landmarks: Any) -> tuple[float, float] | None:
-    if hand_landmarks is None:
+def get_stable_prediction(history: list[tuple[str | None, float]]) -> str | None:
+    eligible = [
+        gesture
+        for gesture, confidence in history[-STABILIZATION_FRAMES:]
+        if gesture is not None and confidence >= CONFIDENCE_THRESHOLD
+    ]
+    if not eligible:
         return None
-    anchor_indices = [0, 5, 9, 13, 17]
-    xs = []
-    ys = []
-    for index in anchor_indices:
-        if index < len(hand_landmarks.landmark):
-            xs.append(hand_landmarks.landmark[index].x)
-            ys.append(hand_landmarks.landmark[index].y)
-    if not xs or not ys:
-        return None
-    return float(np.mean(xs)), float(np.mean(ys))
+    gesture, votes = Counter(eligible).most_common(1)[0]
+    return gesture if votes >= STABILIZATION_VOTES else None
 
 
-def stop_camera() -> None:
-    camera = st.session_state.pop("camera", None)
-    if camera is not None:
-        try:
-            camera.release()
-        except Exception:
-            pass
-    st.session_state.pop("camera_initial_frame", None)
-    st.session_state["camera_running"] = False
+def is_new_stable_gesture(current: str | None, previous: str | None) -> bool:
+    return current is not None and current != previous
 
 
 def open_camera_capture() -> tuple[Any | None, str]:
-    existing_capture = st.session_state.get("camera")
-    if existing_capture is not None:
-        if st.session_state.get("camera_running") and existing_capture.isOpened():
-            return existing_capture, st.session_state.get("camera_message", "Camera already running.")
+    existing = st.session_state.get("camera_capture")
+    if existing is not None:
+        try:
+            if st.session_state.get("camera_running") and existing.isOpened():
+                return existing, "Camera is already running."
+        except Exception:
+            pass
         stop_camera()
 
     capture = None
@@ -129,487 +149,539 @@ def open_camera_capture() -> tuple[Any | None, str]:
         capture = cv2.VideoCapture(0)
         if not capture.isOpened():
             capture.release()
-            return None, "Unable to open the webcam. Check device permissions or another app using the camera."
-
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        ret, frame = capture.read()
-        if not ret or frame is None or frame.size == 0:
+            return None, "Camera unavailable. Please check camera permissions."
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+        ok, frame = capture.read()
+        if not ok or frame is None or frame.size == 0:
             capture.release()
-            return None, "Camera opened, but the first frame could not be read. Check camera availability."
-    except Exception as exc:
+            return None, "Camera unavailable. Please check camera permissions."
+    except Exception:
         if capture is not None:
-            capture.release()
-        return None, f"Unable to start the webcam: {exc}"
+            try:
+                capture.release()
+            except Exception:
+                pass
+        return None, "Camera unavailable. Please check camera permissions."
 
     st.session_state["camera_initial_frame"] = frame
-    return capture, "Camera opened and frame received successfully."
+    return capture, "Camera ready."
 
 
-def normalize_gesture(prediction: Any) -> str | None:
-    token = re.sub(r"[\s_-]+", "", str(prediction).strip().upper())
-    labels = {
-        "OPENPALM": "OPEN_PALM",
-        "FIST": "FIST",
-        "THUMBSUP": "THUMBS_UP",
-        "THUMBSDOWN": "THUMBS_DOWN",
-        "PINCH": "PINCH",
-    }
-    return labels.get(token)
+def stop_camera() -> None:
+    capture = st.session_state.get("camera_capture")
+    if capture is not None:
+        try:
+            capture.release()
+        except Exception:
+            pass
+    st.session_state["camera_capture"] = None
+    st.session_state["camera_initial_frame"] = None
+    st.session_state["camera_running"] = False
+    st.session_state["gesture_history"] = []
+    st.session_state["last_stable_gesture"] = None
+    st.session_state["active_gesture"] = None
+    st.session_state["gesture_confidence"] = 0.0
+    st.session_state["gesture_status"] = "Camera is off"
 
 
-def get_mode_actions(mode: str) -> dict[str, str]:
-    mode_map = {
-        "PowerPoint": {
-            "OPEN_PALM": "space",
-            "THUMBS_UP": "next_slide",
-            "THUMBS_DOWN": "previous_slide",
-            "PINCH": "left_click",
-            "FIST": "disable_control",
-        },
-        "Chrome": {
-            "OPEN_PALM": "space",
-            "THUMBS_UP": "next",
-            "THUMBS_DOWN": "previous",
-            "PINCH": "left_click",
-            "FIST": "disable_control",
-        },
-        "PDF": {
-            "OPEN_PALM": "page_down",
-            "THUMBS_UP": "page_down",
-            "THUMBS_DOWN": "page_up",
-            "PINCH": "left_click",
-            "FIST": "disable_control",
-        },
-    }
-    return mode_map.get(mode, mode_map["PowerPoint"])
+def on_camera_toggle() -> None:
+    if st.session_state.get("camera_enabled", False):
+        capture, message = open_camera_capture()
+        if capture is None:
+            st.session_state["camera_error"] = message
+            st.session_state["camera_enabled"] = False
+            st.session_state["camera_running"] = False
+            return
+        st.session_state["camera_capture"] = capture
+        st.session_state["camera_running"] = True
+        st.session_state["camera_error"] = ""
+        st.session_state["gesture_status"] = "Camera active"
+    else:
+        stop_camera()
+        st.session_state["camera_error"] = ""
 
 
-def execute_stable_gesture(gesture_label: str, mode: str) -> None:
-    canonical_gesture = normalize_gesture(gesture_label)
-    if canonical_gesture is None:
+def queue_ai_action(action: str, topic: str) -> bool:
+    topic = topic.strip()
+    if not topic:
+        st.session_state["ai_error"] = "Enter a topic or question first."
+        return False
+    if st.session_state.get("ai_busy", False):
+        st.session_state["ai_error"] = "AI is thinking... please wait."
+        return False
+
+    if topic != st.session_state.get("current_topic"):
+        st.session_state["current_response"] = ""
+        st.session_state["current_topic"] = topic
+    current_response = st.session_state.get("current_response", "")
+    if action == "EXPLAIN":
+        current_response = ""
+        st.session_state["current_response"] = ""
+
+    service = get_ai_service()
+    try:
+        future = get_ai_executor().submit(service.generate, action, topic, current_response)
+    except Exception:
+        st.session_state["ai_error"] = "AI service is temporarily unavailable."
+        return False
+
+    st.session_state["ai_future"] = future
+    st.session_state["ai_busy"] = True
+    st.session_state["pending_ai_action"] = action
+    st.session_state["pending_ai_topic"] = topic
+    st.session_state["last_action"] = action.title()
+    st.session_state["last_gesture_event"] = f"{action} requested"
+    st.session_state["ai_error"] = ""
+    st.session_state["last_action_at"] = monotonic()
+    return True
+
+
+def complete_ai_request() -> None:
+    future: Future[str] | None = st.session_state.get("ai_future")
+    if not st.session_state.get("ai_busy") or future is None or not future.done():
         return
 
+    action = st.session_state.get("pending_ai_action", "")
+    try:
+        response = future.result()
+    except AIServiceError:
+        st.session_state["ai_error"] = "AI service is temporarily unavailable."
+        st.session_state["last_gesture_event"] = f"{action} failed"
+        st.session_state["ai_connection_state"] = "unavailable"
+    except Exception:
+        st.session_state["ai_error"] = "AI service is temporarily unavailable."
+        st.session_state["last_gesture_event"] = f"{action} failed"
+        st.session_state["ai_connection_state"] = "unavailable"
+    else:
+        st.session_state["current_response"] = response
+        st.session_state["ai_error"] = ""
+        st.session_state["ai_interactions"] += 1
+        st.session_state["last_gesture_event"] = f"{action} completed"
+        service = get_ai_service()
+        st.session_state["ai_connection_state"] = "connected" if service.api_key else "demo"
+    finally:
+        st.session_state["ai_busy"] = False
+        st.session_state["ai_future"] = None
+        st.session_state["pending_ai_action"] = ""
+        st.session_state["pending_ai_topic"] = ""
+
+
+def reset_interaction() -> None:
+    future: Future[str] | None = st.session_state.get("ai_future")
+    if future is not None:
+        future.cancel()
+    st.session_state["ai_future"] = None
+    st.session_state["ai_busy"] = False
+    st.session_state["pending_ai_action"] = ""
+    st.session_state["pending_ai_topic"] = ""
+    st.session_state["current_topic"] = ""
+    st.session_state["current_response"] = ""
+    st.session_state["ai_error"] = ""
+    st.session_state["last_action"] = "Session reset"
+    st.session_state["last_gesture_event"] = "Session reset."
+    st.session_state["topic_widget_version"] += 1
+    st.session_state["topic_widget_key"] = f"topic_input_{st.session_state['topic_widget_version']}"
+
+
+def queue_gesture_action(gesture: str) -> bool:
+    if gesture == "FIST":
+        reset_interaction()
+        return True
+
+    action = GESTURE_ACTIONS[gesture]
+    topic = st.session_state.get("current_topic", "")
+    if not topic:
+        topic = st.session_state.get(st.session_state.get("topic_widget_key", ""), "")
+    if not topic.strip():
+        st.session_state["ai_error"] = "Enter a topic or question first."
+        st.session_state["last_action"] = action.title()
+        st.session_state["last_gesture_event"] = f"{gesture} needs a topic"
+        return False
+
+    return queue_ai_action(action, topic)
+
+
+def _handle_camera_gesture(gesture: str) -> None:
     now = monotonic()
-    st.session_state["gesture_event_debug"] = ""
-    mode_map = get_mode_actions(mode)
-    action_name = mode_map.get(canonical_gesture)
-    if not action_name or action_name == "noop":
-        st.session_state["action_status"] = "Ready"
+    if gesture == "FIST":
+        st.session_state["last_stable_gesture"] = gesture
+        st.session_state["active_gesture"] = gesture
+        st.session_state["gesture_count"] += 1
+        queue_gesture_action(gesture)
+        st.session_state["last_gesture_event"] = "FIST · Session reset."
+        st.session_state["gesture_status"] = "Session reset."
         return
 
-    if canonical_gesture == "FIST":
-        st.session_state["runtime_control_blocked"] = True
-        st.session_state["action_status"] = "Control Disabled — Fist detected"
-        st.session_state["last_action_time"] = now
-        st.session_state["last_action_gesture"] = "fist"
-        st.session_state["last_action_until"] = now + 1.0
+    if now - st.session_state.get("last_action_at", 0.0) < ACTION_COOLDOWN_SECONDS:
         return
+    st.session_state["last_stable_gesture"] = gesture
+    st.session_state["active_gesture"] = gesture
+    st.session_state["gesture_count"] += 1
+    action = GESTURE_ACTIONS[gesture]
+    st.session_state["last_gesture_event"] = f"{gesture} · {action}"
+    if st.session_state.get("ai_busy", False):
+        st.session_state["gesture_status"] = "AI is thinking..."
+        return
+    started = queue_gesture_action(gesture)
+    if started:
+        st.session_state["gesture_status"] = "AI is thinking..."
+    else:
+        st.session_state["gesture_status"] = st.session_state.get("ai_error", "Enter a topic or question first.")
 
-    if st.session_state.get("runtime_control_blocked", False):
-        if not st.session_state.get("computer_control", False):
-            st.session_state["action_status"] = "Control Disabled — enable Computer Control to resume actions."
-            return
-        st.session_state["runtime_control_blocked"] = False
 
-    if not st.session_state.get("computer_control", False):
-        st.session_state["action_status"] = (
-            f"Gesture recognized, action not triggered — Computer Control OFF; "
-            f"mapped action: {action_name.upper()}"
+@st.fragment(run_every="120ms")
+def render_live_camera(
+    image_placeholder: Any,
+    gesture_placeholder: Any,
+    confidence_placeholder: Any,
+    progress_placeholder: Any,
+    status_placeholder: Any,
+) -> None:
+    if not st.session_state.get("camera_enabled") or not st.session_state.get("camera_running"):
+        if st.session_state.get("camera_error"):
+            image_placeholder.error("Camera unavailable. Please check camera permissions.")
+        else:
+            image_placeholder.info("Show your hand to GestureAI when the camera is on.")
+        gesture_placeholder.markdown("**Detected Gesture**\n\n—")
+        confidence_placeholder.caption("Confidence: —")
+        progress_placeholder.markdown(
+            '<div class="confidence-track"><div class="confidence-fill" style="width:0%"></div></div>',
+            unsafe_allow_html=True,
         )
-        st.session_state["gesture_event_debug"] = ""
+        status_placeholder.caption("Camera off")
         return
 
-    st.session_state["gesture_event_debug"] = ""
-
-    if canonical_gesture == "PINCH":
-        if st.session_state.get("pinch_active", False):
-            return
-        st.session_state["pinch_active"] = True
-        if now - st.session_state.get("last_action_time", 0.0) < 0.5:
-            return
-
-    result = get_action_manager().execute(action_name, target_app=mode)
-    st.session_state["action_status"] = result["message"] if result["status"] == "success" else (
-        f"Gesture recognized, action not triggered — {result['message']}"
-    )
-    st.session_state["last_action_time"] = now
-    st.session_state["last_action_gesture"] = canonical_gesture
-    st.session_state["last_action_until"] = now + 1.0
-    if mode == "PowerPoint":
-        event_lines = [
-            "GESTURE EVENT",
-            f"Gesture: {canonical_gesture}",
-            f"Action: {action_name.upper()}",
-            f"PowerPoint: {result.get('powerpoint', 'NOT FOUND')}",
-            f"Window: {result.get('window', '--')}",
-            f"Window Handle: {result.get('hwnd', '--')}",
-            f"Focus: {result.get('focus', 'UNKNOWN')}",
-            f"Key: {result.get('key', 'UNKNOWN')}",
-            f"Result: {result.get('result', 'NOT SENT')}",
-        ]
-        st.session_state["gesture_event_debug"] = "\n".join(event_lines)
-        print("\n".join(event_lines))
-
-
-def get_stable_prediction(history: List[str]) -> str | None:
-    if len(history) < 5:
-        return None
-    counts = Counter(history)
-    top_label, top_count = counts.most_common(1)[0]
-    if top_count / len(history) >= 0.6:
-        return top_label
-    return None
-
-
-def is_new_stable_gesture(current: str | None, previous: str | None) -> bool:
-    return current is not None and current != previous
-
-
-@st.fragment(run_every="250ms")
-def render_live_frame(frame_placeholder: Any, gesture_display: Any, confidence_display: Any, context_display: Any, action_status_display: Any, debug_display: Any) -> None:
-    if st.session_state.get("dynamic_collection_active"):
-        return
-
-    camera = st.session_state.get("camera")
-    if camera is None or not st.session_state.get("camera_running"):
+    camera = st.session_state.get("camera_capture")
+    if camera is None:
+        st.session_state["camera_running"] = False
+        image_placeholder.error("Camera unavailable. Please check camera permissions.")
         return
 
     frame = st.session_state.pop("camera_initial_frame", None)
     if frame is None:
         try:
-            ret, frame = camera.read()
-        except Exception as exc:
+            ok, frame = camera.read()
+        except Exception:
+            ok, frame = False, None
+        if not ok or frame is None or frame.size == 0:
             stop_camera()
-            frame_placeholder.error(f"Camera opened, but frame read failed: {exc}")
-            st.rerun()
+            st.session_state["camera_error"] = "Camera unavailable. Please check camera permissions."
+            image_placeholder.error(st.session_state["camera_error"])
+            gesture_placeholder.markdown("**Detected Gesture**\n\n—")
+            confidence_placeholder.caption("Confidence: —")
+            status_placeholder.caption("Camera unavailable")
             return
-    else:
-        ret = True
-    if not ret or frame is None or frame.size == 0:
-        st.session_state["last_processed_gesture"] = None
-        st.session_state["gesture_event_debug"] = ""
-        stop_camera()
-        frame_placeholder.error("Camera opened, but a live frame could not be read. Camera stopped.")
-        gesture_display.markdown("<h3>Camera unavailable</h3>", unsafe_allow_html=True)
-        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-        context_display.markdown("<p>Camera opened, but frame read failed.</p>", unsafe_allow_html=True)
-        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-        debug_display.code(
-            "Raw prediction: --\nNormalized gesture: --\nConfidence: --\n"
-            "Stable gesture: --\nMapped action: --"
-        )
-        st.session_state["pinch_active"] = False
-        st.rerun()
-        return
 
     try:
         hand_landmarks, annotated, detection_status = get_hand_detector().detect(frame)
-    except Exception as exc:
-        frame_placeholder.image(frame, width=640, channels="BGR")
-        context_display.markdown(f"<p>Hand detection unavailable: {exc}</p>", unsafe_allow_html=True)
+    except Exception:
+        image_placeholder.image(frame, channels="BGR", width=620)
+        st.session_state["gesture_status"] = "Gesture detector unavailable"
+        status_placeholder.caption(st.session_state["gesture_status"])
         return
 
-    if hand_landmarks is None:
-        frame_placeholder.image(annotated, width=640, channels="BGR")
+    current_confidence = 0.0
+    current_gesture = None
+    if hand_landmarks is not None and not st.session_state.get("model_load_error"):
+        try:
+            prediction = get_predictor().predict(extract_feature_vector(hand_landmarks, frame.shape))
+            current_gesture = normalize_gesture(prediction["label"])
+            current_confidence = float(prediction["confidence"])
+        except Exception:
+            st.session_state["model_load_error"] = "Gesture model could not be loaded."
+
+    if not st.session_state.get("gesture_enabled", True):
         st.session_state["gesture_history"] = []
         st.session_state["last_stable_gesture"] = None
-        st.session_state["last_processed_gesture"] = None
-        st.session_state["gesture_event_debug"] = ""
-        gesture_display.markdown("<h3>No Hand</h3>", unsafe_allow_html=True)
-        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-        context_display.markdown(f"<p>{detection_status}</p>", unsafe_allow_html=True)
-        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-        debug_display.code(
-            "Raw prediction: --\nNormalized gesture: --\nConfidence: --\n"
-            "Stable gesture: --\nMapped action: --"
-        )
-        st.session_state["pinch_active"] = False
-        return
-
-    try:
-        features = extract_feature_vector(hand_landmarks, frame.shape)
-        prediction = get_predictor().predict(features)
-    except Exception:
-        frame_placeholder.image(annotated, width=640, channels="BGR")
-        gesture_display.markdown("<h3>Prediction unavailable</h3>", unsafe_allow_html=True)
-        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-        context_display.markdown("<p>Model not ready</p>", unsafe_allow_html=True)
-        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-        return
-
-    raw_prediction = prediction["label"]
-    gesture_name = normalize_gesture(raw_prediction)
-    confidence = float(prediction["confidence"])
-    history = st.session_state.get("gesture_history", [])
-    if gesture_name is None:
-        history = []
+        st.session_state["active_gesture"] = None
+        stable = None
+        st.session_state["gesture_status"] = "Gesture recognition paused"
+    elif hand_landmarks is None:
+        st.session_state["gesture_history"] = []
+        st.session_state["last_stable_gesture"] = None
+        st.session_state["active_gesture"] = None
+        stable = None
+        st.session_state["gesture_status"] = "Show your hand to GestureAI"
     else:
-        history.append(gesture_name)
-    if len(history) > 8:
-        history = history[-8:]
-    st.session_state["gesture_history"] = history
+        history: list[tuple[str | None, float]] = st.session_state.get("gesture_history", [])
+        history.append((current_gesture, current_confidence))
+        st.session_state["gesture_history"] = history[-STABILIZATION_FRAMES:]
+        stable = get_stable_prediction(st.session_state["gesture_history"])
+        if stable is not None:
+            st.session_state["active_gesture"] = stable
+            st.session_state["gesture_confidence"] = current_confidence
+            st.session_state["gesture_status"] = "Gesture detected"
+            if is_new_stable_gesture(stable, st.session_state.get("last_stable_gesture")):
+                _handle_camera_gesture(stable)
+        elif st.session_state.get("last_stable_gesture") is not None:
+            st.session_state["active_gesture"] = st.session_state["last_stable_gesture"]
+            st.session_state["gesture_confidence"] = current_confidence
+            st.session_state["gesture_status"] = "Gesture held"
+        else:
+            st.session_state["active_gesture"] = current_gesture
+            st.session_state["gesture_confidence"] = current_confidence
+            st.session_state["gesture_status"] = "Waiting for stability" if current_gesture else detection_status
 
-    current_stable = get_stable_prediction(history)
-    st.session_state["last_stable_gesture"] = current_stable
-
-    if current_stable is not None:
-        gesture_display.markdown(f"<h3>{current_stable.replace('_', ' ').title()}</h3>", unsafe_allow_html=True)
-    else:
-        display_gesture = gesture_name.replace("_", " ").title() if gesture_name else "Unrecognized"
-        gesture_display.markdown(f"<h3>{display_gesture}</h3>", unsafe_allow_html=True)
-    confidence_display.markdown(f"<h3>{confidence * 100:.2f}%</h3>", unsafe_allow_html=True)
-    context_display.markdown(f"<p>{'Gesture Stable' if current_stable is not None else 'Waiting for stability'}</p>", unsafe_allow_html=True)
-
-    mode_map = get_mode_actions(st.session_state.get("app_mode", "PowerPoint"))
-    trace_gesture = current_stable or gesture_name
-    trace_action = mode_map.get(trace_gesture, "--") if trace_gesture else "--"
-    debug_display.code(
-        f"Raw prediction: {raw_prediction!r}\n"
-        f"Normalized gesture: {gesture_name or '--'}\n"
-        f"Confidence: {confidence:.4f}\n"
-        f"Stable gesture: {current_stable or '--'}\n"
-        f"Mapped action: {trace_action.upper()}"
+    image_placeholder.image(annotated, channels="BGR", width=620)
+    active = st.session_state.get("active_gesture")
+    gesture_label = GESTURE_NAMES.get(active, active.replace("_", " ") if active else "—")
+    confidence = float(st.session_state.get("gesture_confidence", 0.0))
+    gesture_placeholder.markdown(f"**Detected Gesture**\n\n### {gesture_label}")
+    confidence_placeholder.caption(f"Confidence: {confidence:.0%}" if active else "Confidence: —")
+    progress_placeholder.markdown(
+        f'<div class="confidence-track"><div class="confidence-fill" style="width:{confidence * 100:.1f}%"></div></div>',
+        unsafe_allow_html=True,
     )
+    status_placeholder.caption(st.session_state.get("gesture_status", "READY"))
 
-    if is_new_stable_gesture(current_stable, st.session_state.get("last_processed_gesture")):
-        execute_stable_gesture(current_stable, st.session_state.get("app_mode", "PowerPoint"))
-        st.session_state["last_processed_gesture"] = current_stable
-    elif current_stable is None:
-        st.session_state["last_processed_gesture"] = None
-        st.session_state["pinch_active"] = False
 
-    if current_stable in {"OPEN_PALM", "FIST", "THUMBS_UP", "THUMBS_DOWN", "PINCH"}:
-        action_status_display.markdown(f"<p>{st.session_state.get('action_status', 'Waiting for gesture')}</p>", unsafe_allow_html=True)
+@st.fragment(run_every="250ms")
+def render_ai_response(
+    topic_placeholder: Any,
+    action_placeholder: Any,
+    status_placeholder: Any,
+    response_placeholder: Any,
+) -> None:
+    complete_ai_request()
+    topic = st.session_state.get("current_topic", "")
+    response = st.session_state.get("current_response", "")
+    if topic:
+        topic_placeholder.markdown(f"**CURRENT TOPIC**\n\n{topic}")
     else:
-        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+        topic_placeholder.markdown("**CURRENT TOPIC**\n\nEnter a topic or question to begin.")
 
-    if st.session_state.get("runtime_control_blocked", False):
-        st.session_state["pinch_active"] = False
+    action = st.session_state.get("last_action", "No action yet")
+    event = st.session_state.get("last_gesture_event", "")
+    action_placeholder.markdown(
+        f'<span class="action-badge">LAST GESTURE ACTION · {action.upper()}</span>'
+        + (f"<br><span class=\"muted-copy\">{event}</span>" if event else ""),
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("ai_busy"):
+        status_placeholder.info("AI is thinking...")
+    elif st.session_state.get("ai_error"):
+        status_placeholder.warning(st.session_state["ai_error"])
+    else:
+        status_placeholder.empty()
 
-    if st.session_state.get("gesture_event_debug"):
-        debug_display.code(
-            f"Raw prediction: {raw_prediction!r}\n"
-            f"Normalized gesture: {gesture_name or '--'}\n"
-            f"Confidence: {confidence:.4f}\n"
-            f"Stable gesture: {current_stable or '--'}\n"
-            f"Mapped action: {trace_action.upper()}\n\n"
-            f"{st.session_state['gesture_event_debug']}"
-        )
-
-    cv2.putText(annotated, detection_status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    if current_stable is not None:
-        cv2.putText(annotated, current_stable.replace('_', ' ').upper(), (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 212, 255), 2)
-    frame_placeholder.image(annotated, width=640, channels="BGR")
-
-
-def dataset_status(dataset: GestureDataset) -> str:
-    errors = dataset.validate()
-    if not dataset.dataset_path.exists() or dataset.load().empty:
-        return "Empty"
-    return "Available" if not errors else "Needs More Data"
+    if response:
+        with response_placeholder.container(border=True):
+            st.markdown("**AI EXPLANATION**")
+            st.markdown(response)
+    else:
+        response_placeholder.info("Your explanation will appear here.")
 
 
-def main() -> None:
-    ensure_session_state()
-
+def _render_styles() -> None:
     st.markdown(
         """
         <style>
         :root {
             --bg: #0B1020;
-            --card: #111827;
-            --surface: #172033;
-            --primary: #00D4FF;
-            --secondary: #7C3AED;
-            --success: #22C55E;
-            --warning: #F59E0B;
-            --error: #EF4444;
+            --surface: #111827;
+            --card: #151D2E;
+            --active: #1B263B;
+            --purple: #7C5CFC;
+            --cyan: #00D4FF;
+            --green: #22C55E;
+            --amber: #F59E0B;
+            --red: #EF4444;
             --text: #F8FAFC;
-            --muted: #94A3B8;
+            --secondary: #94A3B8;
+            --muted: #64748B;
+            --border: #263247;
         }
         html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
-            background-color: var(--bg);
+            background: var(--bg);
             color: var(--text);
-            font-family: 'Inter', Arial, sans-serif;
+            font-family: Inter, Arial, sans-serif;
         }
-        .block-container {
-            padding-top: 1.2rem;
-            padding-bottom: 1.2rem;
+        [data-testid="stSidebar"] { background: #111827; border-right: 1px solid var(--border); }
+        .block-container { max-width: 1500px; padding: 1.25rem 1.5rem 1.75rem; }
+        h1, h2, h3 { color: var(--text); }
+        h1 { font-size: 30px !important; font-weight: 700 !important; }
+        h2 { font-size: 20px !important; font-weight: 600 !important; }
+        h3 { font-size: 17px !important; font-weight: 600 !important; }
+        p, label, li { color: var(--secondary); }
+        [data-testid="stMetricValue"] { color: var(--text); }
+        [data-testid="stImage"] img { border-radius: 8px; }
+        .brand-tagline { color: var(--secondary); font-size: 14px; }
+        .mode-badge {
+            display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px;
+            border: 1px solid var(--border); border-radius: 999px; background: var(--card);
+            color: var(--text); font-size: 13px; font-weight: 600;
         }
-        .status-pill {
-            background: var(--card);
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 0.85rem;
-            color: var(--text);
-            padding: 0.75rem 0.9rem;
-            margin-bottom: 0.5rem;
+        .mode-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .confidence-track { height: 7px; width: 100%; overflow: hidden; border-radius: 9px; background: var(--border); }
+        .confidence-fill { height: 100%; background: var(--purple); border-radius: 9px; }
+        .gesture-tile {
+            min-height: 92px; padding: 12px 8px; background: var(--card);
+            border: 1px solid var(--border); border-radius: 10px; text-align: center;
         }
-        .stButton > button {
-            background: var(--surface);
-            color: var(--text);
-            border: 1px solid rgba(0,212,255,0.45);
-            border-radius: 0.5rem;
-            font-weight: 600;
+        .gesture-tile.active { background: var(--active); border: 1px solid var(--purple); }
+        .gesture-icon { color: var(--text); font-size: 23px; line-height: 1.2; }
+        .gesture-name { color: var(--text); font-size: 13px; font-weight: 600; margin-top: 5px; }
+        .gesture-action { color: var(--secondary); font-size: 11px; margin-top: 2px; }
+        .action-badge { display: inline-block; padding: 5px 9px; color: var(--text); background: var(--active); border: 1px solid var(--border); border-radius: 999px; font-size: 11px; font-weight: 600; }
+        .muted-copy { color: var(--secondary); font-size: 13px; }
+        .stButton > button, [data-testid="stFormSubmitButton"] button {
+            min-height: 44px; color: white; background: var(--purple); border: 1px solid var(--purple);
+            border-radius: 9px; font-weight: 600;
         }
-        .card {
-            background: rgba(17, 24, 39, 0.9);
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 1rem;
-            padding: 1rem;
+        .stButton > button:hover, [data-testid="stFormSubmitButton"] button:hover { background: var(--active); border-color: var(--purple); color: white; }
+        [data-testid="stTextInput"] input { background: var(--surface); color: var(--text); border-color: var(--border); }
+        [data-testid="stProgress"] > div > div { background: var(--purple); }
+        [data-testid="stAlert"] { background: var(--surface); border-color: var(--border); }
+        @media (max-width: 760px) {
+            .block-container { padding: 1rem 0.8rem; }
+            .gesture-tile { min-height: 82px; padding: 9px 3px; }
+            .gesture-name { font-size: 11px; }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.image(str(LOGO_PATH), width=220)
-    st.caption("Move naturally, control digitally.")
 
-    status_col1, status_col2, status_col3 = st.columns(3)
-    with status_col1:
-        render_status("Camera", "Ready" if st.session_state.get("camera_running") else "Not Connected", "#22C55E" if st.session_state.get("camera_running") else "#94A3B8")
-    with status_col2:
-        render_status("Model", model_status(), "#00D4FF" if MODEL_PATH.exists() else "#94A3B8")
-    with status_col3:
-        if st.session_state.get("runtime_control_blocked"):
-            control_value = "BLOCKED"
-            control_color = "#F59E0B"
-        else:
-            control_value = "ON" if st.session_state.get("computer_control") else "OFF"
-            control_color = "#22C55E" if st.session_state.get("computer_control") else "#F59E0B"
-        render_status("Control", control_value, control_color)
+def _ai_badge(service: AIService) -> tuple[str, str]:
+    if not service.api_key:
+        return "DEMO MODE", "#F59E0B"
+    state = st.session_state.get("ai_connection_state", "unknown")
+    if state == "connected":
+        return "AI ACTIVE", "#22C55E"
+    if state == "unavailable":
+        return "AI UNAVAILABLE", "#F59E0B"
+    return "AI API CONFIGURED", "#F59E0B"
 
-    st.subheader("Application Mode")
-    mode = st.selectbox("Select mode", ["PowerPoint", "PDF", "Chrome"], index=0, key="app_mode")
 
-    if mode == "PowerPoint":
-        st.subheader("POWERPOINT CONTROL")
-        powerpoint_status = "Launched" if st.session_state["powerpoint_launched"] else "Not Running"
-        st.markdown(f"**PowerPoint Status:** {powerpoint_status}")
-        if st.button("Launch PowerPoint", key="launch_powerpoint_button"):
-            launch_status, launch_message = launch_powerpoint()
-            st.session_state["powerpoint_launched"] = launch_status == "launched"
-            st.session_state["powerpoint_launch_message"] = launch_message
-            st.rerun()
-        if st.session_state.get("powerpoint_launch_message"):
-            if st.session_state["powerpoint_launched"]:
-                st.success(st.session_state["powerpoint_launch_message"])
-            else:
-                st.warning(st.session_state["powerpoint_launch_message"])
-        test_next_col, test_previous_col = st.columns(2)
-        with test_next_col:
-            if st.button("TEST NEXT SLIDE", key="test_next_slide_button"):
-                execute_stable_gesture("THUMBS_UP", mode)
-        with test_previous_col:
-            if st.button("TEST PREVIOUS SLIDE", key="test_previous_slide_button"):
-                execute_stable_gesture("THUMBS_DOWN", mode)
-        if st.session_state.get("action_status", "").startswith("Gesture recognized, action not triggered"):
-            st.warning(st.session_state["action_status"])
-        elif st.session_state.get("gesture_event_debug"):
-            st.code(st.session_state["gesture_event_debug"])
+def main() -> None:
+    ensure_session_state()
+    _render_styles()
+
+    service = get_ai_service()
+    predictor = None
+    if not st.session_state.get("model_load_error"):
+        try:
+            predictor = get_predictor()
+        except Exception:
+            st.session_state["model_load_error"] = "Gesture model could not be loaded."
+
+    with st.sidebar:
+        st.markdown("## GestureAI")
+        st.caption("Hands-free AI learning")
+        st.markdown("**CONTROLS**")
+        st.toggle("Camera", key="camera_enabled", on_change=on_camera_toggle)
+        st.toggle("Gesture Recognition", key="gesture_enabled")
+        badge_text, badge_color = _ai_badge(service)
+        st.markdown("**AI Mode**")
         st.markdown(
-            "**Instructions**\n\n"
-            "1. Open your presentation\n"
-            "2. Start Slide Show\n"
-            "3. Start Camera\n"
-            "4. Enable Computer Control"
+            f'<span class="mode-badge"><span class="mode-dot" style="background:{badge_color}"></span>{badge_text}</span>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("**ABOUT**")
+        st.caption(
+            "GestureAI is a hands-free AI learning interface that combines computer vision, "
+            "machine learning, and AI-assisted learning."
+        )
+        st.divider()
+        st.markdown("**SYSTEM STATUS**")
+        st.caption(f"Camera · {'Ready' if st.session_state.get('camera_running') else 'Off'}")
+        model_ready = predictor is not None
+        st.caption(f"Model · {'Loaded' if model_ready else 'Unavailable'}")
+        st.caption(f"Gesture Engine · {'Active' if st.session_state.get('gesture_enabled') else 'Paused'}")
+        if not service.api_key:
+            st.caption("AI · Demo Mode")
+        elif st.session_state.get("ai_connection_state") == "connected":
+            st.caption("AI · Connected")
+        else:
+            st.caption("AI · Not verified")
+
+    badge_text, badge_color = _ai_badge(service)
+    header_left, header_right = st.columns([0.78, 0.22], vertical_alignment="center")
+    with header_left:
+        logo_col, title_col = st.columns([0.12, 0.88], vertical_alignment="center")
+        with logo_col:
+            if LOGO_PATH.exists():
+                st.image(str(LOGO_PATH), width=54)
+        with title_col:
+            st.markdown("# GestureAI")
+            st.markdown('<div class="brand-tagline">Move naturally. Learn intelligently.</div>', unsafe_allow_html=True)
+    with header_right:
+        st.markdown(
+            f'<div style="text-align:right"><span class="mode-badge"><span class="mode-dot" style="background:{badge_color}"></span>{badge_text}</span></div>',
+            unsafe_allow_html=True,
+        )
+    st.divider()
+
+    left_column, right_column = st.columns([0.9, 1.1], gap="large")
+    with left_column:
+        st.markdown("## LIVE GESTURE INPUT")
+        camera_label = "Camera Active" if st.session_state.get("camera_running") else "Camera Off"
+        st.caption(camera_label)
+        image_placeholder = st.empty()
+        gesture_placeholder = st.empty()
+        confidence_placeholder = st.empty()
+        progress_placeholder = st.empty()
+        status_placeholder = st.empty()
+        render_live_camera(
+            image_placeholder,
+            gesture_placeholder,
+            confidence_placeholder,
+            progress_placeholder,
+            status_placeholder,
+        )
+        if st.session_state.get("model_load_error"):
+            st.error("Gesture model could not be loaded.")
+
+    with right_column:
+        st.markdown("## AI STUDY ASSISTANT")
+        st.caption("Ask anything. Learn naturally.")
+        with st.form("ask_ai_form", clear_on_submit=False):
+            st.text_input("Ask a question or enter a topic...", key=st.session_state["topic_widget_key"])
+            ask = st.form_submit_button("ASK AI", use_container_width=True)
+        if ask:
+            typed_topic = st.session_state.get(st.session_state["topic_widget_key"], "")
+            started = queue_ai_action("EXPLAIN", typed_topic)
+            if started:
+                st.session_state["gesture_status"] = "AI is thinking..."
+
+        topic_placeholder = st.empty()
+        action_placeholder = st.empty()
+        ai_status_placeholder = st.empty()
+        response_placeholder = st.empty()
+        render_ai_response(
+            topic_placeholder,
+            action_placeholder,
+            ai_status_placeholder,
+            response_placeholder,
         )
 
-    control_enabled = st.toggle("Computer Control", key="computer_control")
-
-    if not control_enabled:
-        st.session_state["runtime_control_blocked"] = False
-        st.info("Control is OFF. Gesture recognition is still active, but no computer actions will execute.")
-    else:
-        st.session_state["runtime_control_blocked"] = st.session_state.get("runtime_control_blocked", False)
-
-    left_col, right_col = st.columns([1.7, 1])
-
-    with left_col:
-        st.subheader("Live Camera")
-        frame_placeholder = st.empty()
-        if st.session_state.get("camera_running"):
-            if st.button("Stop Camera", key="stop_camera_button"):
-                stop_camera()
-                st.rerun()
-        else:
-            if st.button("Start Camera", key="start_camera_button"):
-                camera, camera_message = open_camera_capture()
-                if camera is None:
-                    st.error(camera_message)
-                else:
-                    st.session_state["camera"] = camera
-                    st.session_state["camera_running"] = True
-                    st.session_state["camera_message"] = camera_message
-                    st.rerun()
-
-    with right_col:
-        st.subheader("Recognition")
-        st.markdown("### Current Gesture")
-        gesture_display = st.empty()
-        st.markdown("### Confidence")
-        confidence_display = st.empty()
-        st.markdown("### Status")
-        context_display = st.empty()
-        st.markdown("### Action")
-        action_status_display = st.empty()
-        debug_display = st.empty()
-
-    st.subheader("PowerPoint Mapping")
-    mapping_cols = st.columns(5)
-    gestures = [
-        ("Open Palm", "Space / Play-Pause"),
-        ("Fist", "Disable Control"),
-        ("Thumbs Up", "Next Slide"),
-        ("Thumbs Down", "Previous Slide"),
-        ("Pinch", "Mouse Click"),
+    st.divider()
+    st.markdown("### GESTURE COMMANDS")
+    command_columns = st.columns(5, gap="small")
+    active_gesture = st.session_state.get("active_gesture")
+    command_rows = [
+        ("OPEN_PALM", "EXPLAIN"),
+        ("THUMBS_UP", "DEEP DIVE"),
+        ("THUMBS_DOWN", "SIMPLIFY"),
+        ("PINCH", "EXAMPLE"),
+        ("FIST", "RESET"),
     ]
-    for idx, (label, action) in enumerate(gestures):
-        with mapping_cols[idx]:
-            st.markdown(
-                f"<div class='card'><strong>{label}</strong><br><span style='color:#94A3B8;'>{action}</span></div>",
-                unsafe_allow_html=True,
-            )
+    for column, (gesture, action) in zip(command_columns, command_rows):
+        tile_class = "gesture-tile active" if active_gesture == gesture else "gesture-tile"
+        column.markdown(
+            f'<div class="{tile_class}"><div class="gesture-icon">{GESTURE_ICONS[gesture]}</div>'
+            f'<div class="gesture-name">{GESTURE_NAMES[gesture].upper()}</div>'
+            f'<div class="gesture-action">{action}</div></div>',
+            unsafe_allow_html=True,
+        )
 
-    if st.session_state.get("camera_running"):
-        render_live_frame(frame_placeholder, gesture_display, confidence_display, context_display, action_status_display, debug_display)
-    else:
-        frame_placeholder.info("Camera is not connected. Start the camera to begin recognition.")
-        gesture_display.markdown("<h3>Waiting...</h3>", unsafe_allow_html=True)
-        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-        context_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
-        debug_display.code("Raw prediction: --\nNormalized gesture: --\nConfidence: --\nStable gesture: --\nMapped action: --")
-
-    st.subheader("System Status")
-    dataset = load_or_create_dataset()
-    system_cols = st.columns(3)
-    with system_cols[0]:
-        st.metric("Camera", camera_status())
-    with system_cols[1]:
-        st.metric("Model", model_status())
-    with system_cols[2]:
-        st.metric("Dataset", dataset_status(dataset))
-
-    if st.button("Disable Control", key="disable_control_button"):
-        st.session_state["runtime_control_blocked"] = True
-        st.session_state["action_status"] = "Control blocked — disabled"
-        st.rerun()
-
-    if st.button("Train Model", key="train_model_button"):
-        try:
-            trainer = get_trainer()
-            dataset_manager = load_or_create_dataset()
-            validation_errors = dataset_manager.validate()
-            if validation_errors:
-                st.warning("Training cannot start yet. Please collect enough samples.")
-            else:
-                evaluation = trainer.train(dataset_manager.load())
-                st.success("Training complete.")
-                st.json(evaluation)
-        except Exception as exc:
-            st.error(f"Training failed: {exc}")
+    st.caption(
+        f"Gestures used: {st.session_state['gesture_count']} · "
+        f"AI interactions: {st.session_state['ai_interactions']} · "
+        f"Last action: {st.session_state['last_action']}"
+    )
 
 
 if __name__ == "__main__":
