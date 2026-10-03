@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from collections import Counter
 from pathlib import Path
 from time import monotonic
@@ -22,7 +21,10 @@ from src.utils.config import DATASET_PATH, DEFAULT_GESTURES, EVALUATION_PATH, MO
 from src.vision.feature_extractor import extract_feature_vector
 from src.vision.hand_detector import HandDetector
 
-st.set_page_config(page_title="GestureAI", page_icon="🤖", layout="wide")
+LOGO_PATH = Path(__file__).resolve().parent / "assets" / "gestureai_logo.png"
+
+
+st.set_page_config(page_title="GestureAI", page_icon=str(LOGO_PATH), layout="wide")
 
 
 @st.cache_resource
@@ -57,10 +59,6 @@ def parse_dataset_for_ui() -> List[str]:
 
 
 def ensure_session_state() -> None:
-    st.session_state.setdefault("intro_done", False)
-    st.session_state.setdefault("splash_done", False)
-    st.session_state.setdefault("startup_seen", False)
-    st.session_state.setdefault("splash_started_at", monotonic())
     st.session_state.setdefault("camera_running", False)
     st.session_state.setdefault("camera", None)
     st.session_state.setdefault("computer_control", False)
@@ -111,71 +109,41 @@ def compute_hand_center_xy(hand_landmarks: Any) -> tuple[float, float] | None:
 def stop_camera() -> None:
     camera = st.session_state.pop("camera", None)
     if camera is not None:
-        camera.release()
+        try:
+            camera.release()
+        except Exception:
+            pass
+    st.session_state.pop("camera_initial_frame", None)
     st.session_state["camera_running"] = False
 
 
-def enter_gestureai() -> None:
-    st.session_state["intro_done"] = True
-    st.session_state["splash_done"] = True
-    st.session_state["startup_seen"] = True
+def open_camera_capture() -> tuple[Any | None, str]:
+    existing_capture = st.session_state.get("camera")
+    if existing_capture is not None:
+        if st.session_state.get("camera_running") and existing_capture.isOpened():
+            return existing_capture, st.session_state.get("camera_message", "Camera already running.")
+        stop_camera()
 
+    capture = None
+    try:
+        capture = cv2.VideoCapture(0)
+        if not capture.isOpened():
+            capture.release()
+            return None, "Unable to open the webcam. Check device permissions or another app using the camera."
 
-def render_intro_video() -> None:
-    st.markdown(
-        """
-        <style>
-        [data-testid="stAppViewContainer"], [data-testid="stApp"] {
-            background: #050b16;
-        }
-        header, footer, #MainMenu {
-            visibility: hidden;
-        }
-        .block-container {
-            padding-top: 5vh;
-        }
-        div[data-testid="stVideo"] {
-            max-width: 1280px;
-            margin: 0 auto;
-        }
-        .intro-fallback {
-            min-height: min(62vw, 720px);
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            color: #eaf6ff;
-            text-align: center;
-            background: radial-gradient(ellipse at 50% 54%, #102136 0%, #050b16 68%);
-        }
-        .intro-fallback h1 {
-            font-size: clamp(2.8rem, 7vw, 6rem);
-            font-weight: 300;
-            margin: 0;
-        }
-        .intro-fallback p {
-            color: #a9c5da;
-            font-size: 1.15rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        ret, frame = capture.read()
+        if not ret or frame is None or frame.size == 0:
+            capture.release()
+            return None, "Camera opened, but the first frame could not be read. Check camera availability."
+    except Exception as exc:
+        if capture is not None:
+            capture.release()
+        return None, f"Unable to start the webcam: {exc}"
 
-    video_path = Path(__file__).resolve().parent / "assets" / "gestureai_intro.mp4"
-    video_column = st.columns([0.15, 5, 0.15])[1]
-    with video_column:
-        if video_path.is_file():
-            st.video(str(video_path), autoplay=True, muted=True)
-        else:
-            st.markdown(
-                '<div class="intro-fallback"><h1>GestureAI</h1>'
-                '<p>Move naturally, control digitally.</p></div>',
-                unsafe_allow_html=True,
-            )
-    button_column = st.columns([1, 1, 1])[1]
-    with button_column:
-        st.button("Enter GestureAI", key="enter_gestureai_button", on_click=enter_gestureai)
+    st.session_state["camera_initial_frame"] = frame
+    return capture, "Camera opened and frame received successfully."
 
 
 def normalize_gesture(prediction: Any) -> str | None:
@@ -201,13 +169,13 @@ def get_mode_actions(mode: str) -> dict[str, str]:
         },
         "Chrome": {
             "OPEN_PALM": "space",
-            "THUMBS_UP": "right_arrow",
-            "THUMBS_DOWN": "left_arrow",
+            "THUMBS_UP": "next",
+            "THUMBS_DOWN": "previous",
             "PINCH": "left_click",
             "FIST": "disable_control",
         },
         "PDF": {
-            "OPEN_PALM": "space",
+            "OPEN_PALM": "page_down",
             "THUMBS_UP": "page_down",
             "THUMBS_DOWN": "page_up",
             "PINCH": "left_click",
@@ -224,10 +192,6 @@ def execute_stable_gesture(gesture_label: str, mode: str) -> None:
 
     now = monotonic()
     st.session_state["gesture_event_debug"] = ""
-    if st.session_state.get("runtime_control_blocked", False):
-        st.session_state["action_status"] = "Control Disabled — Fist detected"
-        return
-
     mode_map = get_mode_actions(mode)
     action_name = mode_map.get(canonical_gesture)
     if not action_name or action_name == "noop":
@@ -241,6 +205,12 @@ def execute_stable_gesture(gesture_label: str, mode: str) -> None:
         st.session_state["last_action_gesture"] = "fist"
         st.session_state["last_action_until"] = now + 1.0
         return
+
+    if st.session_state.get("runtime_control_blocked", False):
+        if not st.session_state.get("computer_control", False):
+            st.session_state["action_status"] = "Control Disabled — enable Computer Control to resume actions."
+            return
+        st.session_state["runtime_control_blocked"] = False
 
     if not st.session_state.get("computer_control", False):
         st.session_state["action_status"] = (
@@ -258,28 +228,22 @@ def execute_stable_gesture(gesture_label: str, mode: str) -> None:
         st.session_state["pinch_active"] = True
         if now - st.session_state.get("last_action_time", 0.0) < 0.5:
             return
-        result = get_action_manager().execute(action_name)
-        st.session_state["action_status"] = result["message"]
-        st.session_state["last_action_time"] = now
-        st.session_state["last_action_gesture"] = "PINCH"
-        st.session_state["last_action_until"] = now + 1.0
-        return
 
-    result = get_action_manager().execute(action_name)
-    st.session_state["action_status"] = (
-        f"✓ {result['message']}" if result["status"] == "success" else
+    result = get_action_manager().execute(action_name, target_app=mode)
+    st.session_state["action_status"] = result["message"] if result["status"] == "success" else (
         f"Gesture recognized, action not triggered — {result['message']}"
     )
     st.session_state["last_action_time"] = now
     st.session_state["last_action_gesture"] = canonical_gesture
     st.session_state["last_action_until"] = now + 1.0
-    if action_name in {"next_slide", "previous_slide"}:
+    if mode == "PowerPoint":
         event_lines = [
             "GESTURE EVENT",
             f"Gesture: {canonical_gesture}",
             f"Action: {action_name.upper()}",
-            f"Controller: {result.get('controller', action_name + '()')}",
-            f"PowerPoint: {result.get('powerpoint', 'UNKNOWN')}",
+            f"PowerPoint: {result.get('powerpoint', 'NOT FOUND')}",
+            f"Window: {result.get('window', '--')}",
+            f"Window Handle: {result.get('hwnd', '--')}",
             f"Focus: {result.get('focus', 'UNKNOWN')}",
             f"Key: {result.get('key', 'UNKNOWN')}",
             f"Result: {result.get('result', 'NOT SENT')}",
@@ -302,7 +266,7 @@ def is_new_stable_gesture(current: str | None, previous: str | None) -> bool:
     return current is not None and current != previous
 
 
-@st.fragment(run_every="150ms")
+@st.fragment(run_every="250ms")
 def render_live_frame(frame_placeholder: Any, gesture_display: Any, confidence_display: Any, context_display: Any, action_status_display: Any, debug_display: Any) -> None:
     if st.session_state.get("dynamic_collection_active"):
         return
@@ -311,22 +275,50 @@ def render_live_frame(frame_placeholder: Any, gesture_display: Any, confidence_d
     if camera is None or not st.session_state.get("camera_running"):
         return
 
-    ret, frame = camera.read()
-    if not ret:
-        st.error("Camera could not provide a frame.")
+    frame = st.session_state.pop("camera_initial_frame", None)
+    if frame is None:
+        try:
+            ret, frame = camera.read()
+        except Exception as exc:
+            stop_camera()
+            frame_placeholder.error(f"Camera opened, but frame read failed: {exc}")
+            st.rerun()
+            return
+    else:
+        ret = True
+    if not ret or frame is None or frame.size == 0:
+        st.session_state["last_processed_gesture"] = None
+        st.session_state["gesture_event_debug"] = ""
         stop_camera()
+        frame_placeholder.error("Camera opened, but a live frame could not be read. Camera stopped.")
+        gesture_display.markdown("<h3>Camera unavailable</h3>", unsafe_allow_html=True)
+        confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
+        context_display.markdown("<p>Camera opened, but frame read failed.</p>", unsafe_allow_html=True)
+        action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
+        debug_display.code(
+            "Raw prediction: --\nNormalized gesture: --\nConfidence: --\n"
+            "Stable gesture: --\nMapped action: --"
+        )
+        st.session_state["pinch_active"] = False
+        st.rerun()
         return
 
-    detector = get_hand_detector()
-    hand_landmarks, annotated, status = detector.detect(frame)
+    try:
+        hand_landmarks, annotated, detection_status = get_hand_detector().detect(frame)
+    except Exception as exc:
+        frame_placeholder.image(frame, width=640, channels="BGR")
+        context_display.markdown(f"<p>Hand detection unavailable: {exc}</p>", unsafe_allow_html=True)
+        return
+
     if hand_landmarks is None:
+        frame_placeholder.image(annotated, width=640, channels="BGR")
         st.session_state["gesture_history"] = []
         st.session_state["last_stable_gesture"] = None
         st.session_state["last_processed_gesture"] = None
         st.session_state["gesture_event_debug"] = ""
         gesture_display.markdown("<h3>No Hand</h3>", unsafe_allow_html=True)
         confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
-        context_display.markdown("<p>Not detected</p>", unsafe_allow_html=True)
+        context_display.markdown(f"<p>{detection_status}</p>", unsafe_allow_html=True)
         action_status_display.markdown("<p>Waiting for gesture</p>", unsafe_allow_html=True)
         debug_display.code(
             "Raw prediction: --\nNormalized gesture: --\nConfidence: --\n"
@@ -339,6 +331,7 @@ def render_live_frame(frame_placeholder: Any, gesture_display: Any, confidence_d
         features = extract_feature_vector(hand_landmarks, frame.shape)
         prediction = get_predictor().predict(features)
     except Exception:
+        frame_placeholder.image(annotated, width=640, channels="BGR")
         gesture_display.markdown("<h3>Prediction unavailable</h3>", unsafe_allow_html=True)
         confidence_display.markdown("<h3>--</h3>", unsafe_allow_html=True)
         context_display.markdown("<p>Model not ready</p>", unsafe_allow_html=True)
@@ -404,10 +397,10 @@ def render_live_frame(frame_placeholder: Any, gesture_display: Any, confidence_d
             f"{st.session_state['gesture_event_debug']}"
         )
 
-    cv2.putText(annotated, status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(annotated, detection_status, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     if current_stable is not None:
         cv2.putText(annotated, current_stable.replace('_', ' ').upper(), (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 212, 255), 2)
-    frame_placeholder.image(annotated, channels="BGR")
+    frame_placeholder.image(annotated, width=640, channels="BGR")
 
 
 def dataset_status(dataset: GestureDataset) -> str:
@@ -419,10 +412,6 @@ def dataset_status(dataset: GestureDataset) -> str:
 
 def main() -> None:
     ensure_session_state()
-
-    if not st.session_state.get("intro_done", False):
-        render_intro_video()
-        return
 
     st.markdown(
         """
@@ -474,7 +463,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    st.title("GestureAI")
+    st.image(str(LOGO_PATH), width=220)
     st.caption("Move naturally, control digitally.")
 
     status_col1, status_col2, status_col3 = st.columns(3)
@@ -492,7 +481,7 @@ def main() -> None:
         render_status("Control", control_value, control_color)
 
     st.subheader("Application Mode")
-    mode = st.selectbox("Select mode", ["PowerPoint"], index=0, key="app_mode")
+    mode = st.selectbox("Select mode", ["PowerPoint", "PDF", "Chrome"], index=0, key="app_mode")
 
     if mode == "PowerPoint":
         st.subheader("POWERPOINT CONTROL")
@@ -546,12 +535,13 @@ def main() -> None:
                 st.rerun()
         else:
             if st.button("Start Camera", key="start_camera_button"):
-                camera = cv2.VideoCapture(0)
-                if not camera.isOpened():
-                    st.error("Camera could not be accessed. Check permissions or another app using it.")
+                camera, camera_message = open_camera_capture()
+                if camera is None:
+                    st.error(camera_message)
                 else:
                     st.session_state["camera"] = camera
                     st.session_state["camera_running"] = True
+                    st.session_state["camera_message"] = camera_message
                     st.rerun()
 
     with right_col:
