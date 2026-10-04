@@ -83,6 +83,9 @@ def ensure_session_state() -> None:
         "gesture_history": [],
         "last_stable_gesture": None,
         "active_gesture": None,
+        "previous_gesture": None,
+        "quiz_questions": [],
+        "quiz_submitted": False,
         "gesture_confidence": 0.0,
         "gesture_status": "Show your hand to GestureAI",
         "gesture_count": 0,
@@ -206,7 +209,47 @@ def on_camera_toggle() -> None:
         st.session_state["camera_error"] = ""
 
 def generate_knowledge_response(action: str, topic: str) -> str:
-    """Generate a response from the local educational knowledge base."""
+    """Generate a topic-specific response for the selected study action."""
+
+    topic = topic.strip()
+
+    if not topic:
+        return "Please enter a topic or question first."
+
+    # Use the existing AIService demo knowledge when available.
+    # It already contains detailed action-specific responses for
+    # important Computer Engineering topics.
+    service = get_ai_service()
+
+    topic_lower = topic.casefold()
+
+    rich_topics = (
+        "binary search",
+        "dijkstra",
+        "normalization",
+        "normalisation",
+        "machine learning",
+        "operating system",
+        "operating systems",
+    )
+
+    if any(keyword in topic_lower for keyword in rich_topics):
+        try:
+            response = service.generate(
+                action=action,
+                topic=topic,
+                current_response="",
+            )
+
+            if response:
+                return response
+
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------
+    # Fallback to the local knowledge base for other topics.
+    # ---------------------------------------------------------
 
     knowledge = get_knowledge_service()
     result = knowledge.search(topic)
@@ -214,37 +257,56 @@ def generate_knowledge_response(action: str, topic: str) -> str:
     if not result["found"]:
         return (
             "I couldn't find a reliable answer for that topic in my "
-            "local knowledge base yet. Try asking about a Computer "
-            "Engineering topic such as DSA, DBMS, AI/ML, Operating "
-            "Systems, Computer Networks, or Data Science."
+            "local knowledge base yet.\n\n"
+            "Try asking about Binary Search, Dijkstra, SQL, DBMS, "
+            "Normalization, Linked Lists, Stack, Queue, Machine Learning, "
+            "Operating Systems, Computer Networks, AI, or Data Science."
         )
 
     answer = result["answer"]
     matched_topic = result["topic"]
 
-    if action == "SIMPLIFY":
+    if action == "EXPLAIN":
         return (
-            f"### Simple Explanation\n\n"
+            f"### Explanation\n\n"
             f"{answer}\n\n"
             f"**Topic:** {matched_topic}"
         )
 
+    if action == "SIMPLIFY":
+        return (
+            f"### Simplified Explanation\n\n"
+            f"{answer}\n\n"
+            f"**In simple words:**\n"
+            f"{matched_topic} can be understood by focusing first "
+            f"on its main purpose and then understanding how its "
+            f"individual steps work together."
+        )
+
     if action == "EXAMPLE":
         return (
-            f"### Explanation with Example\n\n"
+            f"### Example\n\n"
+            f"**Concept:** {matched_topic}\n\n"
             f"{answer}\n\n"
-            f"**Topic:** {matched_topic}\n\n"
-            f"**Example:** Think of this concept as a practical "
-            f"example related to {matched_topic.lower()}."
+            f"**Practical example:**\n"
+            f"Consider a small real-world situation where you need "
+            f"to apply {matched_topic.lower()}. Break the problem "
+            f"into the same steps used by the concept and observe "
+            f"how each step changes the result."
         )
 
     if action == "DEEP DIVE":
         return (
             f"### Deep Dive\n\n"
+            f"**Core Concept**\n\n"
             f"{answer}\n\n"
-            f"**Topic:** {matched_topic}\n\n"
-            f"Use this as the foundation, then explore its algorithm, "
-            f"advantages, limitations, and real-world applications."
+            f"**Important points to study**\n\n"
+            f"- Understand the purpose of {matched_topic}.\n"
+            f"- Learn its main steps or components.\n"
+            f"- Understand its efficiency and limitations.\n"
+            f"- Know where it is used in real applications.\n"
+            f"- Be able to explain it in your own words during a viva or interview.\n\n"
+            f"**Topic:** {matched_topic}"
         )
 
     return (
@@ -252,7 +314,6 @@ def generate_knowledge_response(action: str, topic: str) -> str:
         f"{answer}\n\n"
         f"**Topic:** {matched_topic}"
     )
-
 def queue_ai_action(action: str, topic: str) -> bool:
     """Generate a local knowledge-base response immediately."""
 
@@ -369,35 +430,102 @@ def queue_gesture_action(gesture: str) -> bool:
 
     return queue_ai_action(action, topic)
 
-
 def _handle_camera_gesture(gesture: str) -> None:
-    now = monotonic()
-    if gesture == "FIST":
+    """Handle stable gestures and gesture combinations."""
+
+    previous_gesture = st.session_state.get("previous_gesture")
+
+    # ============================================================
+    # GESTURE COMBINATION:
+    # PINCH → THUMBS UP = START QUIZ
+    # ============================================================
+    if previous_gesture == "PINCH" and gesture == "THUMBS_UP":
+
+        st.session_state["quiz_questions"] = generate_quiz(
+            st.session_state.get("current_topic", "")
+        )
+
+        if st.session_state["quiz_questions"]:
+            st.session_state["quiz_submitted"] = False
+            st.session_state["last_action"] = "Quiz Mode"
+            st.session_state["last_gesture_event"] = (
+                "PINCH + THUMBS UP · Quiz started"
+            )
+            st.session_state["gesture_status"] = (
+                "🧠 Quiz Mode activated!"
+            )
+        else:
+            st.session_state["last_gesture_event"] = (
+                "PINCH + THUMBS UP · No quiz available"
+            )
+            st.session_state["gesture_status"] = (
+                "Enter a supported topic first."
+            )
+
+        st.session_state["previous_gesture"] = gesture
         st.session_state["last_stable_gesture"] = gesture
         st.session_state["active_gesture"] = gesture
         st.session_state["gesture_count"] += 1
-        queue_gesture_action(gesture)
-        st.session_state["last_gesture_event"] = "FIST · Session reset."
-        st.session_state["gesture_status"] = "Session reset."
+
         return
 
-    if now - st.session_state.get("last_action_at", 0.0) < ACTION_COOLDOWN_SECONDS:
+    # ============================================================
+    # FIST = RESET
+    # ============================================================
+    if gesture == "FIST":
+
+        reset_interaction()
+
+        st.session_state["quiz_questions"] = []
+        st.session_state["quiz_submitted"] = False
+        st.session_state["previous_gesture"] = None
+
+        st.session_state["last_stable_gesture"] = gesture
+        st.session_state["active_gesture"] = gesture
+        st.session_state["gesture_count"] += 1
+
+        st.session_state["last_gesture_event"] = (
+            "FIST · Session reset."
+        )
+        st.session_state["gesture_status"] = "Session reset."
+
         return
+
+    # ============================================================
+    # IGNORE SAME HELD GESTURE
+    # ============================================================
+    if gesture == st.session_state.get("last_stable_gesture"):
+        return
+
+    # ============================================================
+    # NORMAL GESTURE HANDLING
+    # ============================================================
+    st.session_state["previous_gesture"] = gesture
     st.session_state["last_stable_gesture"] = gesture
     st.session_state["active_gesture"] = gesture
     st.session_state["gesture_count"] += 1
+
     action = GESTURE_ACTIONS[gesture]
-    st.session_state["last_gesture_event"] = f"{gesture} · {action}"
+
+    st.session_state["last_gesture_event"] = (
+        f"{gesture} · {action}"
+    )
+
     if st.session_state.get("ai_busy", False):
         st.session_state["gesture_status"] = "AI is thinking..."
         return
+
     started = queue_gesture_action(gesture)
+
     if started:
-        st.session_state["gesture_status"] = "AI is thinking..."
+        st.session_state["gesture_status"] = (
+            f"{action} activated"
+        )
     else:
-        st.session_state["gesture_status"] = st.session_state.get("ai_error", "Enter a topic or question first.")
-
-
+        st.session_state["gesture_status"] = st.session_state.get(
+            "ai_error",
+            "Enter a topic or question first."
+        )
 @st.fragment(run_every="120ms")
 def render_live_camera(
     image_placeholder: Any,
@@ -504,7 +632,7 @@ def render_live_camera(
     status_placeholder.caption(st.session_state.get("gesture_status", "READY"))
 
 
-
+@st.fragment(run_every="250ms")
 def render_ai_response(
     topic_placeholder: Any,
     action_placeholder: Any,
@@ -539,6 +667,8 @@ def render_ai_response(
             st.markdown(response)
     else:
         response_placeholder.info("Your explanation will appear here.")
+
+    render_quiz_mode()  
 
 
 def _render_styles() -> None:
@@ -622,6 +752,132 @@ def _ai_badge(service: AIService) -> tuple[str, str]:
         return "AI UNAVAILABLE", "#F59E0B"
     return "AI API CONFIGURED", "#F59E0B"
 
+def generate_quiz(topic: str) -> list[dict]:
+    """Generate a small local quiz for the selected topic."""
+
+    topic = topic.strip()
+
+    if not topic:
+        return []
+
+    knowledge = get_knowledge_service()
+    result = knowledge.search(topic)
+
+    if not result["found"]:
+        return []
+
+    matched_topic = result["topic"]
+    answer = result["answer"]
+
+    quiz_bank = {
+        "binary search": [
+            {
+                "question": "What is required before applying Binary Search?",
+                "options": [
+                    "The data must be sorted",
+                    "The data must be random",
+                    "The data must be duplicated",
+                    "The data must be stored in a stack",
+                ],
+                "answer": "The data must be sorted",
+            },
+            {
+                "question": "What is the typical time complexity of Binary Search?",
+                "options": ["O(n)", "O(log n)", "O(n²)", "O(1)"],
+                "answer": "O(log n)",
+            },
+            {
+                "question": "Which element is checked first in Binary Search?",
+                "options": [
+                    "First element",
+                    "Last element",
+                    "Middle element",
+                    "Random element",
+                ],
+                "answer": "Middle element",
+            },
+            {
+                "question": "Binary Search repeatedly eliminates approximately what fraction of the search space?",
+                "options": [
+                    "One quarter",
+                    "One half",
+                    "All of it",
+                    "None",
+                ],
+                "answer": "One half",
+            },
+            {
+                "question": "Binary Search works directly on which type of data?",
+                "options": [
+                    "Sorted sequence",
+                    "Only linked lists",
+                    "Only graphs",
+                    "Only trees",
+                ],
+                "answer": "Sorted sequence",
+            },
+        ],
+    }
+
+    topic_key = matched_topic.casefold()
+
+    if "binary search" in topic_key:
+        return quiz_bank["binary search"]
+
+    # Safe fallback for topics without dedicated questions yet.
+    return [
+        {
+            "question": f"Which statement best describes {matched_topic}?",
+            "options": [
+                answer,
+                "It is unrelated to computer science.",
+                "It can never be used in practical applications.",
+                "It is only used for hardware design.",
+            ],
+            "answer": answer,
+        }
+    ]
+def render_quiz_mode() -> None:
+    questions = st.session_state.get("quiz_questions", [])
+
+    if not questions:
+        return
+
+    st.markdown("## 🧠 Quiz Mode")
+    st.caption("Test your understanding of the current topic.")
+
+    with st.container(border=True):
+        answers = []
+
+        for i, question in enumerate(questions, start=1):
+            st.markdown(f"**Q{i}. {question['question']}**")
+
+            selected = st.radio(
+                "Choose an answer:",
+                question["options"],
+                key=f"quiz_answer_{i}",
+                index=None,
+            )
+
+            answers.append(selected)
+
+        if st.button("Submit Quiz", type="primary"):
+            score = 0
+
+            for selected, question in zip(answers, questions):
+                if selected == question["answer"]:
+                    score += 1
+
+            st.session_state["quiz_submitted"] = True
+            st.session_state["quiz_score"] = score
+
+        if st.session_state.get("quiz_submitted", False):
+            score = st.session_state.get("quiz_score", 0)
+            total = len(questions)
+
+            st.success(
+                f"Quiz completed! Score: **{score}/{total}**"
+            )
 
 def main() -> None:
     ensure_session_state()
@@ -724,6 +980,119 @@ def main() -> None:
             ai_status_placeholder,
             response_placeholder,
         )
+# ============================================================
+# AI QUIZ MODE
+# ============================================================
+
+st.markdown("## 🧠 AI QUIZ MODE")
+st.caption("Test your understanding of the current topic.")
+
+current_topic = st.session_state.get("current_topic", "").strip()
+
+if "quiz_questions" not in st.session_state:
+    st.session_state["quiz_questions"] = []
+
+if "quiz_score" not in st.session_state:
+    st.session_state["quiz_score"] = 0
+
+if "quiz_submitted" not in st.session_state:
+    st.session_state["quiz_submitted"] = False
+
+quiz_col1, quiz_col2 = st.columns([3, 1])
+
+with quiz_col1:
+    if current_topic:
+        st.info(f"Topic: **{current_topic}**")
+    else:
+        st.info("Enter a topic above first.")
+
+with quiz_col2:
+    generate_button = st.button(
+        "🧠 Generate Quiz",
+        use_container_width=True,
+    )
+
+if generate_button:
+    if not current_topic:
+        st.warning("Please enter a topic first.")
+    else:
+        questions = generate_quiz(current_topic)
+
+        if questions:
+            st.session_state["quiz_questions"] = questions
+            st.session_state["quiz_score"] = 0
+            st.session_state["quiz_submitted"] = False
+            st.rerun()
+        else:
+            st.warning(
+                "No quiz is available for this topic yet."
+            )
+
+questions = st.session_state.get("quiz_questions", [])
+
+if questions:
+    st.markdown("### Test Yourself")
+
+    with st.form("quiz_form"):
+
+        selected_answers = {}
+
+        for index, question in enumerate(questions):
+
+            st.markdown(
+                f"**Q{index + 1}. {question['question']}**"
+            )
+
+            selected_answers[index] = st.radio(
+                "Choose an answer:",
+                question["options"],
+                key=f"quiz_answer_{index}",
+                label_visibility="collapsed",
+            )
+
+            st.divider()
+
+        submit_quiz = st.form_submit_button(
+            "✅ Submit Quiz",
+            use_container_width=True,
+        )
+
+    if submit_quiz:
+
+        score = 0
+
+        for index, question in enumerate(questions):
+
+            if selected_answers[index] == question["answer"]:
+                score += 1
+
+        st.session_state["quiz_score"] = score
+        st.session_state["quiz_submitted"] = True
+
+    if st.session_state.get("quiz_submitted"):
+
+        score = st.session_state["quiz_score"]
+        total = len(questions)
+
+        st.success(
+            f"🎯 Your Score: **{score}/{total}**"
+        )
+
+        percentage = int((score / total) * 100)
+
+        if percentage == 100:
+            st.balloons()
+            st.success("Excellent! You mastered this topic.")
+
+        elif percentage >= 60:
+            st.info(
+                "Good job! Review the topic once more to strengthen your understanding."
+            )
+
+        else:
+            st.warning(
+                "Keep practicing. Try using Simplify or Example before attempting the quiz again."
+            )
 
     st.divider()
     st.markdown("### GESTURE COMMANDS")
