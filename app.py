@@ -11,6 +11,7 @@ import streamlit as st
 
 from src.ml.predictor import GesturePredictor
 from src.services.ai_service import AIService, AIServiceError
+from src.services.knowledge_service import KnowledgeService
 from src.vision.feature_extractor import extract_feature_vector
 from src.vision.hand_detector import HandDetector
 
@@ -62,6 +63,9 @@ def get_hand_detector() -> HandDetector:
 def get_ai_service() -> AIService:
     return AIService()
 
+@st.cache_resource
+def get_knowledge_service() -> KnowledgeService:
+    return KnowledgeService()
 
 @st.cache_resource
 def get_ai_executor() -> ThreadPoolExecutor:
@@ -201,12 +205,63 @@ def on_camera_toggle() -> None:
         stop_camera()
         st.session_state["camera_error"] = ""
 
+def generate_knowledge_response(action: str, topic: str) -> str:
+    """Generate a response from the local educational knowledge base."""
+
+    knowledge = get_knowledge_service()
+    result = knowledge.search(topic)
+
+    if not result["found"]:
+        return (
+            "I couldn't find a reliable answer for that topic in my "
+            "local knowledge base yet. Try asking about a Computer "
+            "Engineering topic such as DSA, DBMS, AI/ML, Operating "
+            "Systems, Computer Networks, or Data Science."
+        )
+
+    answer = result["answer"]
+    matched_topic = result["topic"]
+
+    if action == "SIMPLIFY":
+        return (
+            f"### Simple Explanation\n\n"
+            f"{answer}\n\n"
+            f"**Topic:** {matched_topic}"
+        )
+
+    if action == "EXAMPLE":
+        return (
+            f"### Explanation with Example\n\n"
+            f"{answer}\n\n"
+            f"**Topic:** {matched_topic}\n\n"
+            f"**Example:** Think of this concept as a practical "
+            f"example related to {matched_topic.lower()}."
+        )
+
+    if action == "DEEP DIVE":
+        return (
+            f"### Deep Dive\n\n"
+            f"{answer}\n\n"
+            f"**Topic:** {matched_topic}\n\n"
+            f"Use this as the foundation, then explore its algorithm, "
+            f"advantages, limitations, and real-world applications."
+        )
+
+    return (
+        f"### Explanation\n\n"
+        f"{answer}\n\n"
+        f"**Topic:** {matched_topic}"
+    )
 
 def queue_ai_action(action: str, topic: str) -> bool:
+    """Generate a local knowledge-base response immediately."""
+
     topic = topic.strip()
+
     if not topic:
         st.session_state["ai_error"] = "Enter a topic or question first."
         return False
+
     if st.session_state.get("ai_busy", False):
         st.session_state["ai_error"] = "AI is thinking... please wait."
         return False
@@ -214,26 +269,39 @@ def queue_ai_action(action: str, topic: str) -> bool:
     if topic != st.session_state.get("current_topic"):
         st.session_state["current_response"] = ""
         st.session_state["current_topic"] = topic
-    current_response = st.session_state.get("current_response", "")
+
     if action == "EXPLAIN":
-        current_response = ""
         st.session_state["current_response"] = ""
 
-    service = get_ai_service()
-    try:
-        future = get_ai_executor().submit(service.generate, action, topic, current_response)
-    except Exception:
-        st.session_state["ai_error"] = "AI service is temporarily unavailable."
-        return False
-
-    st.session_state["ai_future"] = future
     st.session_state["ai_busy"] = True
     st.session_state["pending_ai_action"] = action
     st.session_state["pending_ai_topic"] = topic
     st.session_state["last_action"] = action.title()
     st.session_state["last_gesture_event"] = f"{action} requested"
     st.session_state["ai_error"] = ""
+
+    try:
+        response = generate_knowledge_response(action, topic)
+
+        # Store the answer directly in Streamlit session state.
+        st.session_state["current_response"] = response
+        st.session_state["ai_connection_state"] = "demo"
+        st.session_state["ai_interactions"] += 1
+        st.session_state["last_gesture_event"] = f"{action} completed"
+
+    except Exception as exc:
+        st.session_state["ai_error"] = (
+            f"Knowledge service error: {exc}"
+        )
+        st.session_state["last_gesture_event"] = f"{action} failed"
+
+    finally:
+        st.session_state["ai_busy"] = False
+        st.session_state["pending_ai_action"] = ""
+        st.session_state["pending_ai_topic"] = ""
+
     st.session_state["last_action_at"] = monotonic()
+
     return True
 
 
@@ -436,7 +504,7 @@ def render_live_camera(
     status_placeholder.caption(st.session_state.get("gesture_status", "READY"))
 
 
-@st.fragment(run_every="250ms")
+
 def render_ai_response(
     topic_placeholder: Any,
     action_placeholder: Any,

@@ -1,37 +1,37 @@
-question,answer,topic
+﻿question,answer,topic
 What is binary search?,Binary search is an efficient searching algorithm for a sorted sequence. It repeatedly compares the target with the middle element and eliminates half of the remaining search space. Its time complexity is O(log n).,Data Structures
 What is linear search?,Linear search checks elements one by one until the target is found or the sequence ends. It works on sorted and unsorted data and has O(n) worst-case time complexity.,Data Structures
 What is recursion?,Recursion is a programming technique in which a function calls itself to solve smaller instances of the same problem. A recursive solution needs a base case to stop the calls.,Data Structures
-What is a linked list?,A linked list is a linear data structure made of nodes. Each node stores data and a link to another node. Unlike arrays, linked-list elements do not need contiguous memory.,Data Structures
-What is a stack?,A stack is a linear data structure that follows LIFO, meaning Last In First Out. Common operations include push, pop, and peek.,Data Structures
-What is a queue?,A queue is a linear data structure that follows FIFO, meaning First In First Out. Elements are inserted at the rear and removed from the front.,Data Structures
+What is a linked list?,"A linked list is a linear data structure made of nodes. Each node stores data and a link to another node. Unlike arrays, linked-list elements do not need contiguous memory.",Data Structures
+What is a stack?,"A stack is a linear data structure that follows LIFO, meaning Last In First Out. Common operations include push, pop, and peek.",Data Structures
+What is a queue?,"A queue is a linear data structure that follows FIFO, meaning First In First Out. Elements are inserted at the rear and removed from the front.",Data Structures
 What is BFS?,Breadth-First Search is a graph traversal algorithm that visits vertices level by level. It commonly uses a queue and can find shortest paths in unweighted graphs.,Algorithms
 What is DFS?,Depth-First Search explores a graph by going as deep as possible before backtracking. It can be implemented using recursion or a stack.,Algorithms
 What is Dijkstra's algorithm?,Dijkstra's algorithm finds shortest paths from a source vertex to other vertices in a weighted graph with non-negative edge weights. It repeatedly selects the closest unvisited vertex and relaxes its edges.,Algorithms
-What is SQL?,SQL or Structured Query Language is used to define, retrieve, manipulate, and manage data in relational database systems.,Database
-What is DBMS?,A Database Management System is software that allows users and applications to create, store, organize, retrieve, and manage data in databases.,Database
+What is SQL?,"SQL, or Structured Query Language, is used to define, retrieve, manipulate, and manage data in relational database systems.",Database
+What is DBMS?,"A Database Management System is software that allows users and applications to create, store, organize, retrieve, and manage data in databases.",Database
 What is normalization?,Normalization is the process of organizing relational data to reduce unnecessary redundancy and avoid update anomalies. It commonly involves dividing data into related tables.,Database
 What is a primary key?,A primary key is a column or combination of columns that uniquely identifies each row in a relational table. Primary-key values cannot be duplicated.,Database
 What is machine learning?,Machine learning is a branch of artificial intelligence in which algorithms learn patterns from data and use those patterns to make predictions or decisions on new data.,Machine Learning
 What is supervised learning?,Supervised learning trains a model using examples where the desired output or label is known. Classification and regression are common supervised-learning tasks.,Machine Learning
 What is classification in machine learning?,Classification is a supervised-learning task in which a model assigns an input to one of several predefined categories.,Machine Learning
 What is a decision tree?,A decision tree is a supervised-learning model that makes predictions by applying a sequence of feature-based decision rules represented as a tree.,Machine Learning
-What is random forest?,Random Forest is an ensemble learning method that combines predictions from multiple decision trees. For classification, the trees typically vote on the predicted class.,Machine Learning
-What is overfitting?,Overfitting occurs when a model learns the training data too closely, including patterns that do not generalize well, causing poorer performance on unseen data.,Machine Learning
-What is artificial intelligence?,Artificial Intelligence is the field of computing concerned with building systems that perform tasks associated with capabilities such as reasoning, perception, learning, language understanding, and decision making.,Artificial Intelligence
-What is an operating system?,An operating system is system software that manages computer hardware and provides services for application programs. Examples include process management, memory management, file management, and device management.,Operating Systems
+What is random forest?,"Random Forest is an ensemble learning method that combines predictions from multiple decision trees. For classification, the trees typically vote on the predicted class.",Machine Learning
+What is overfitting?,"Overfitting occurs when a model learns the training data too closely, including patterns that do not generalize well, causing poorer performance on unseen data.",Machine Learning
+What is artificial intelligence?,"Artificial Intelligence is the field of computing concerned with building systems that perform tasks associated with capabilities such as reasoning, perception, learning, language understanding, and decision making.",Artificial Intelligence
+What is an operating system?,"An operating system is system software that manages computer hardware and provides services for application programs. Examples include process management, memory management, file management, and device management.",Operating Systems
 What is a process?,A process is a program in execution together with its current state and resources. The operating system manages processes and schedules their execution.,Operating Systems
 What is a thread?,A thread is a unit of execution within a process. Multiple threads in the same process can share resources while executing independently.,Operating Systems
 What is computer networking?,Computer networking is the connection of computing devices so that they can communicate and share data or resources using communication protocols.,Computer Networks
 What is an IP address?,An IP address is a numerical address used to identify a device or network interface in an IP network. IPv4 uses 32-bit addresses and IPv6 uses 128-bit addresses.,Computer Networks
-What is HTTP?,HTTP or Hypertext Transfer Protocol is an application-layer protocol used for communication between clients and servers on the web.,Computer Networks
-What is data science?,Data science combines statistics, programming, domain knowledge, and data-processing techniques to extract useful insights or build predictive systems from data.,Data Science
+What is HTTP?,"HTTP, or Hypertext Transfer Protocol, is an application-layer protocol used for communication between clients and servers on the web.",Computer Networks
+What is data science?,"Data science combines statistics, programming, domain knowledge, and data-processing techniques to extract useful insights or build predictive systems from data.",Data Science
 What is correlation?,Correlation measures the strength and direction of association between two variables. Correlation alone does not establish that one variable causes another.,Statistics
 What is a histogram?,A histogram is a chart that groups numerical observations into intervals called bins and displays the frequency or count within each interval.,Data Science
-What is object oriented programming?,Object-oriented programming is a programming paradigm that organizes software around objects containing data and behavior. Major concepts include encapsulation, inheritance, polymorphism, and abstraction.,Programming
+What is object oriented programming?,"Object-oriented programming is a programming paradigm that organizes software around objects containing data and behavior. Major concepts include encapsulation, inheritance, polymorphism, and abstraction.",Programming
 What is encapsulation?,Encapsulation combines data and the methods that operate on that data within a class and controls how the internal state is accessed or modified.,Programming
 What is inheritance?,Inheritance allows a class to acquire or reuse properties and behavior from another class. It supports hierarchical relationships and code reuse.,Programming
 What is polymorphism?,Polymorphism allows the same interface or operation to behave differently for different objects or types. It can be achieved through mechanisms such as overloading and overriding.,Programming
-What is computer graphics?,Computer graphics is the field concerned with creating, representing, manipulating, and displaying visual information using computers.,Computer Graphics
-What is software engineering?,Software engineering is the systematic application of engineering principles to the development, testing, maintenance, and management of software systems.,Software Engineering
-What is SDLC?,The Software Development Life Cycle is a structured process for developing software. Common stages include requirements, design, implementation, testing, deployment, and maintenance.,Software Engineering
+What is computer graphics?,"Computer graphics is the field concerned with creating, representing, manipulating, and displaying visual information using computers.",Computer Graphics
+What is software engineering?,"Software engineering is the systematic application of engineering principles to the development, testing, maintenance, and management of software systems.",Software Engineering
+What is SDLC?,"The Software Development Life Cycle is a structured process for developing software. Common stages include requirements, design, implementation, testing, deployment, and maintenance.",Software Engineering
