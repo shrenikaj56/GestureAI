@@ -27,20 +27,20 @@ GESTURE_NAMES = {
     "FIST": "Fist",
     "THUMBS_UP": "Thumbs Up",
     "THUMBS_DOWN": "Thumbs Down",
-    "PINCH": "Pinch",
+    "V_SIGN": "V Sign",
 }
 GESTURE_ACTIONS = {
     "OPEN_PALM": "EXPLAIN",
     "THUMBS_UP": "DEEP DIVE",
     "THUMBS_DOWN": "SIMPLIFY",
-    "PINCH": "EXAMPLE",
+    "V_SIGN": "EXAMPLE",
     "FIST": "RESET",
 }
 GESTURE_ICONS = {
     "OPEN_PALM": "✋",
     "THUMBS_UP": "👍",
     "THUMBS_DOWN": "👎",
-    "PINCH": "🤏",
+    "V_SIGN": "✌️",
     "FIST": "✊",
 }
 
@@ -91,6 +91,7 @@ def ensure_session_state() -> None:
         "gesture_count": 0,
         "current_topic": "",
         "current_response": "",
+        "answer_locked": False,
         "last_action": "No action yet",
         "last_gesture_event": "",
         "ai_busy": False,
@@ -116,7 +117,7 @@ def normalize_gesture(prediction: Any) -> str | None:
         "FIST": "FIST",
         "THUMBSUP": "THUMBS_UP",
         "THUMBSDOWN": "THUMBS_DOWN",
-        "PINCH": "PINCH",
+        "VSIGN": "V_SIGN",
     }
     return aliases.get(token)
 
@@ -406,6 +407,7 @@ def reset_interaction() -> None:
     st.session_state["pending_ai_topic"] = ""
     st.session_state["current_topic"] = ""
     st.session_state["current_response"] = ""
+    st.session_state["answer_locked"] = False
     st.session_state["ai_error"] = ""
     st.session_state["last_action"] = "Session reset"
     st.session_state["last_gesture_event"] = "Session reset."
@@ -417,6 +419,9 @@ def queue_gesture_action(gesture: str) -> bool:
     if gesture == "FIST":
         reset_interaction()
         return True
+
+    if st.session_state.get("answer_locked", False):
+        return False
 
     action = GESTURE_ACTIONS[gesture]
     topic = st.session_state.get("current_topic", "")
@@ -439,7 +444,7 @@ def _handle_camera_gesture(gesture: str) -> None:
     # GESTURE COMBINATION:
     # PINCH → THUMBS UP = START QUIZ
     # ============================================================
-    if previous_gesture == "PINCH" and gesture == "THUMBS_UP":
+    if previous_gesture == "V_SIGN" and gesture == "THUMBS_UP":
 
         st.session_state["quiz_questions"] = generate_quiz(
             st.session_state.get("current_topic", "")
@@ -447,16 +452,22 @@ def _handle_camera_gesture(gesture: str) -> None:
 
         if st.session_state["quiz_questions"]:
             st.session_state["quiz_submitted"] = False
+            st.session_state["quiz_score"] = 0
             st.session_state["last_action"] = "Quiz Mode"
             st.session_state["last_gesture_event"] = (
-                "PINCH + THUMBS UP · Quiz started"
+                "V_SIGN + THUMBS UP · Quiz started"
             )
             st.session_state["gesture_status"] = (
                 "🧠 Quiz Mode activated!"
             )
+
+            # Leave the camera fragment and redraw the full page
+            # so the interactive quiz is rendered outside the fragment.
+            st.rerun()
+
         else:
             st.session_state["last_gesture_event"] = (
-                "PINCH + THUMBS UP · No quiz available"
+                "V_SIGN + THUMBS UP · No quiz available"
             )
             st.session_state["gesture_status"] = (
                 "Enter a supported topic first."
@@ -468,6 +479,7 @@ def _handle_camera_gesture(gesture: str) -> None:
         st.session_state["gesture_count"] += 1
 
         return
+        
 
     # ============================================================
     # FIST = RESET
@@ -515,6 +527,10 @@ def _handle_camera_gesture(gesture: str) -> None:
         st.session_state["gesture_status"] = "AI is thinking..."
         return
 
+    if st.session_state.get("answer_locked", False):
+        st.session_state["gesture_status"] = "Answer locked — learning mode"
+        return
+
     started = queue_gesture_action(gesture)
 
     if started:
@@ -534,104 +550,251 @@ def render_live_camera(
     progress_placeholder: Any,
     status_placeholder: Any,
 ) -> None:
+
     if not st.session_state.get("camera_enabled") or not st.session_state.get("camera_running"):
         if st.session_state.get("camera_error"):
-            image_placeholder.error("Camera unavailable. Please check camera permissions.")
+            image_placeholder.error(
+                "Camera unavailable. Please check camera permissions."
+            )
         else:
-            image_placeholder.info("Show your hand to GestureAI when the camera is on.")
+            image_placeholder.info(
+                "Show your hand to GestureAI when the camera is on."
+            )
+
         gesture_placeholder.markdown("**Detected Gesture**\n\n—")
         confidence_placeholder.caption("Confidence: —")
+
         progress_placeholder.markdown(
-            '<div class="confidence-track"><div class="confidence-fill" style="width:0%"></div></div>',
+            '<div class="confidence-track">'
+            '<div class="confidence-fill" style="width:0%"></div>'
+            '</div>',
             unsafe_allow_html=True,
         )
+
         status_placeholder.caption("Camera off")
         return
 
     camera = st.session_state.get("camera_capture")
+
     if camera is None:
         st.session_state["camera_running"] = False
-        image_placeholder.error("Camera unavailable. Please check camera permissions.")
+        image_placeholder.error(
+            "Camera unavailable. Please check camera permissions."
+        )
         return
 
     frame = st.session_state.pop("camera_initial_frame", None)
+
     if frame is None:
         try:
             ok, frame = camera.read()
         except Exception:
             ok, frame = False, None
+
         if not ok or frame is None or frame.size == 0:
             stop_camera()
-            st.session_state["camera_error"] = "Camera unavailable. Please check camera permissions."
+            st.session_state["camera_error"] = (
+                "Camera unavailable. Please check camera permissions."
+            )
             image_placeholder.error(st.session_state["camera_error"])
             gesture_placeholder.markdown("**Detected Gesture**\n\n—")
             confidence_placeholder.caption("Confidence: —")
             status_placeholder.caption("Camera unavailable")
             return
+    frame = cv2.flip(frame, 1)
 
     try:
-        hand_landmarks, annotated, detection_status = get_hand_detector().detect(frame)
+        hand_landmarks, annotated, detection_status = (
+            get_hand_detector().detect(frame)
+        )
     except Exception:
         image_placeholder.image(frame, channels="BGR", width=620)
         st.session_state["gesture_status"] = "Gesture detector unavailable"
-        status_placeholder.caption(st.session_state["gesture_status"])
+        status_placeholder.caption(
+            st.session_state["gesture_status"]
+        )
         return
 
     current_confidence = 0.0
     current_gesture = None
+
+    # ------------------------------------------------------------
+    # CURRENT MODEL PREDICTION
+    # ------------------------------------------------------------
     if hand_landmarks is not None and not st.session_state.get("model_load_error"):
         try:
-            prediction = get_predictor().predict(extract_feature_vector(hand_landmarks, frame.shape))
-            current_gesture = normalize_gesture(prediction["label"])
-            current_confidence = float(prediction["confidence"])
+            features = extract_feature_vector(
+                hand_landmarks,
+                frame.shape,
+            )
+
+            predictor = get_predictor()
+
+            prediction = predictor.predict(features)
+
+            current_gesture = normalize_gesture(
+                prediction["label"]
+            )
+
+            current_confidence = float(
+                prediction["confidence"]
+            )
+
+            # TEMPORARY DEBUG
+            probabilities = predictor.model.predict_proba([features])[0]
+
+            debug_text = " | ".join(
+                f"{label}: {probability:.0%}"
+                for label, probability in zip(
+                    ["FIST", "OPEN_PALM", "THUMBS_DOWN", "THUMBS_UP", "V_SIGN"],
+                    probabilities,
+                )
+            )
+
+            st.session_state["debug_probabilities"] = debug_text
+
         except Exception:
-            st.session_state["model_load_error"] = "Gesture model could not be loaded."
+            st.session_state["model_load_error"] = (
+                "Gesture model could not be loaded."
+            )
 
+    # ------------------------------------------------------------
+    # GESTURE RECOGNITION
+    # ------------------------------------------------------------
     if not st.session_state.get("gesture_enabled", True):
-        st.session_state["gesture_history"] = []
-        st.session_state["last_stable_gesture"] = None
-        st.session_state["active_gesture"] = None
-        stable = None
-        st.session_state["gesture_status"] = "Gesture recognition paused"
-    elif hand_landmarks is None:
-        st.session_state["gesture_history"] = []
-        st.session_state["last_stable_gesture"] = None
-        st.session_state["active_gesture"] = None
-        stable = None
-        st.session_state["gesture_status"] = "Show your hand to GestureAI"
-    else:
-        history: list[tuple[str | None, float]] = st.session_state.get("gesture_history", [])
-        history.append((current_gesture, current_confidence))
-        st.session_state["gesture_history"] = history[-STABILIZATION_FRAMES:]
-        stable = get_stable_prediction(st.session_state["gesture_history"])
-        if stable is not None:
-            st.session_state["active_gesture"] = stable
-            st.session_state["gesture_confidence"] = current_confidence
-            st.session_state["gesture_status"] = "Gesture detected"
-            if is_new_stable_gesture(stable, st.session_state.get("last_stable_gesture")):
-                _handle_camera_gesture(stable)
-        elif st.session_state.get("last_stable_gesture") is not None:
-            st.session_state["active_gesture"] = st.session_state["last_stable_gesture"]
-            st.session_state["gesture_confidence"] = current_confidence
-            st.session_state["gesture_status"] = "Gesture held"
-        else:
-            st.session_state["active_gesture"] = current_gesture
-            st.session_state["gesture_confidence"] = current_confidence
-            st.session_state["gesture_status"] = "Waiting for stability" if current_gesture else detection_status
 
-    image_placeholder.image(annotated, channels="BGR", width=620)
-    active = st.session_state.get("active_gesture")
-    gesture_label = GESTURE_NAMES.get(active, active.replace("_", " ") if active else "—")
-    confidence = float(st.session_state.get("gesture_confidence", 0.0))
-    gesture_placeholder.markdown(f"**Detected Gesture**\n\n### {gesture_label}")
-    confidence_placeholder.caption(f"Confidence: {confidence:.0%}" if active else "Confidence: —")
+        st.session_state["gesture_history"] = []
+        st.session_state["last_stable_gesture"] = None
+        st.session_state["active_gesture"] = None
+        st.session_state["gesture_confidence"] = 0.0
+
+        stable = None
+
+        st.session_state["gesture_status"] = (
+            "Gesture recognition paused"
+        )
+
+    elif hand_landmarks is None:
+
+        st.session_state["gesture_history"] = []
+        st.session_state["last_stable_gesture"] = None
+        st.session_state["active_gesture"] = None
+        st.session_state["gesture_confidence"] = 0.0
+
+        stable = None
+
+        st.session_state["gesture_status"] = (
+            "Show your hand to GestureAI"
+        )
+
+    else:
+
+        # Keep recent predictions for stabilization.
+        history = st.session_state.get(
+            "gesture_history",
+            [],
+        )
+
+        history.append(
+            (
+                current_gesture,
+                current_confidence,
+            )
+        )
+
+        st.session_state["gesture_history"] = (
+            history[-STABILIZATION_FRAMES:]
+        )
+
+        stable = get_stable_prediction(
+            st.session_state["gesture_history"]
+        )
+
+        # --------------------------------------------------------
+        # IMPORTANT:
+        # DISPLAY THE CURRENT MODEL PREDICTION.
+        # USE THE STABLE PREDICTION ONLY FOR ACTION TRIGGERS.
+        # --------------------------------------------------------
+
+        st.session_state["active_gesture"] = current_gesture
+        st.session_state["gesture_confidence"] = current_confidence
+
+        if stable is not None:
+
+            st.session_state["gesture_status"] = (
+                "Gesture detected"
+            )
+
+            if is_new_stable_gesture(
+                stable,
+                st.session_state.get(
+                    "last_stable_gesture"
+                ),
+            ):
+                _handle_camera_gesture(stable)
+
+        else:
+
+            st.session_state["gesture_status"] = (
+                "Waiting for stability"
+                if current_gesture
+                else detection_status
+            )
+
+    # ------------------------------------------------------------
+    # DISPLAY
+    # ------------------------------------------------------------
+
+    image_placeholder.image(
+        annotated,
+        channels="BGR",
+        width=620,
+    )
+
+    active = st.session_state.get(
+        "active_gesture"
+    )
+
+    gesture_label = GESTURE_NAMES.get(
+        active,
+        active.replace("_", " ") if active else "—",
+    )
+
+    confidence = float(
+        st.session_state.get(
+            "gesture_confidence",
+            0.0,
+        )
+    )
+
+    gesture_placeholder.markdown(
+        f"**Detected Gesture**\n\n### {gesture_label}"
+    )
+
+    confidence_placeholder.caption(
+        f"Confidence: {confidence:.0%}"
+        if active
+        else "Confidence: —"
+    )
+
     progress_placeholder.markdown(
-        f'<div class="confidence-track"><div class="confidence-fill" style="width:{confidence * 100:.1f}%"></div></div>',
+        f'<div class="confidence-track">'
+        f'<div class="confidence-fill" '
+        f'style="width:{confidence * 100:.1f}%">'
+        f'</div></div>',
         unsafe_allow_html=True,
     )
-    status_placeholder.caption(st.session_state.get("gesture_status", "READY"))
 
-
+    status_placeholder.caption(
+        st.session_state.get(
+            "gesture_status",
+            "READY",
+        )
+    )
+    st.caption(
+    "DEBUG: " +
+    st.session_state.get("debug_probabilities", "")
+    )
 @st.fragment(run_every="250ms")
 def render_ai_response(
     topic_placeholder: Any,
@@ -665,9 +828,9 @@ def render_ai_response(
         with response_placeholder.container(border=True):
             st.markdown("**AI EXPLANATION**")
             st.markdown(response)
+
     else:
         response_placeholder.info("Your explanation will appear here.")
-
     render_quiz_mode()  
 
 
@@ -980,6 +1143,21 @@ def main() -> None:
             ai_status_placeholder,
             response_placeholder,
         )
+
+        # ------------------------------------------------------------
+        # ANSWER LOCK / UNLOCK
+        # ------------------------------------------------------------
+        if st.session_state.get("current_response", ""):
+            if st.session_state.get("answer_locked", False):
+                st.success("Answer locked — you can study this answer without interruption.")
+
+                if st.button("UNLOCK ANSWER", key="unlock_answer", use_container_width=True):
+                    st.session_state["answer_locked"] = False
+                    st.rerun()
+            else:
+                if st.button("LOCK & LEARN", key="lock_answer", use_container_width=True):
+                    st.session_state["answer_locked"] = True
+                    st.rerun()
 # ============================================================
 # AI QUIZ MODE
 # ============================================================
@@ -1102,7 +1280,7 @@ if questions:
         ("OPEN_PALM", "EXPLAIN"),
         ("THUMBS_UP", "DEEP DIVE"),
         ("THUMBS_DOWN", "SIMPLIFY"),
-        ("PINCH", "EXAMPLE"),
+        ("V_SIGN", "EXAMPLE"),
         ("FIST", "RESET"),
     ]
     for column, (gesture, action) in zip(command_columns, command_rows):

@@ -1,0 +1,41 @@
+[33mcommit 708403bb722c3da9c5ea1926e0d31aa6366b453b[m
+Author: shrenikaj56 <shrenikaj05@gmail.com>
+Date:   Fri Oct 2 01:41:55 2026 +0530
+
+    feat:improve dynamic swipe gesture detection
+
+ .gitignore                            |  14 [32m+[m
+ app.py                                | 713 [32m++++++++++++++++++++++++++++++++++[m
+ config/actions.json                   |  39 [32m++[m
+ data/gestures/gesture_dataset.csv     | 501 [32m++++++++++++++++++++++++[m
+ models/dynamic_evaluation.json        |  23 [32m++[m
+ models/dynamic_feature_meta.json      |   8 [32m+[m
+ models/dynamic_gesture_labels.json    |   4 [32m+[m
+ models/evaluation.json                |  52 [32m+++[m
+ models/feature_meta.json              |  92 [32m+++++[m
+ models/gesture_labels.json            |   7 [32m+[m
+ requirements.txt                      |  10 [32m+[m
+ src/__init__.py                       |   1 [32m+[m
+ src/control/__init__.py               |   1 [32m+[m
+ src/control/action_manager.py         |  71 [32m++++[m
+ src/control/context_manager.py        |  37 [32m++[m
+ src/data/__init__.py                  |   1 [32m+[m
+ src/data/collector.py                 |  38 [32m++[m
+ src/ml/__init__.py                    |   1 [32m+[m
+ src/ml/dataset.py                     |  88 [32m+++++[m
+ src/ml/dynamic_dataset.py             |  61 [32m+++[m
+ src/ml/dynamic_features.py            |  84 [32m++++[m
+ src/ml/dynamic_predictor.py           |  38 [32m++[m
+ src/ml/dynamic_trainer.py             |  67 [32m++++[m
+ src/ml/evaluator.py                   |  40 [32m++[m
+ src/ml/predictor.py                   |  37 [32m++[m
+ src/ml/trainer.py                     | 138 [32m+++++++[m
+ src/utils/__init__.py                 |   1 [32m+[m
+ src/utils/config.py                   |  61 [32m+++[m
+ src/utils/logger.py                   |  12 [32m+[m
+ src/utils/temporal_swipe_detector.py  | 227 [32m+++++++++++[m
+ src/vision/__init__.py                |   1 [32m+[m
+ src/vision/feature_extractor.py       |  58 [32m+++[m
+ src/vision/hand_detector.py           |  43 [32m++[m
+ tests/test_temporal_swipe_detector.py |  51 [32m+++[m
+ 34 files changed, 2620 insertions(+)
