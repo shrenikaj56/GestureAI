@@ -537,6 +537,7 @@ def _handle_camera_gesture(gesture: str) -> None:
         st.session_state["gesture_status"] = (
             f"{action} activated"
         )
+        st.rerun()
     else:
         st.session_state["gesture_status"] = st.session_state.get(
             "ai_error",
@@ -795,7 +796,7 @@ def render_live_camera(
     "DEBUG: " +
     st.session_state.get("debug_probabilities", "")
     )
-@st.fragment(run_every="250ms")
+@st.fragment
 def render_ai_response(
     topic_placeholder: Any,
     action_placeholder: Any,
@@ -831,7 +832,7 @@ def render_ai_response(
 
     else:
         response_placeholder.info("Your explanation will appear here.")
-    render_quiz_mode()  
+     
 
 
 def _render_styles() -> None:
@@ -853,6 +854,19 @@ def _render_styles() -> None:
             --muted: #64748B;
             --border: #263247;
         }
+        /* Hide Streamlit's default top header */
+        [data-testid="stHeader"] {
+            display: none;
+        }
+
+        [data-testid="stToolbar"] {
+            display: none;
+        }
+
+        /* Remove the extra top spacing created by the header */
+        [data-testid="stAppViewContainer"] .main .block-container {
+            padding-top: 1.5rem;
+        }
         html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
             background: var(--bg);
             color: var(--text);
@@ -861,11 +875,15 @@ def _render_styles() -> None:
         [data-testid="stSidebar"] { background: #111827; border-right: 1px solid var(--border); }
         .block-container { max-width: 1500px; padding: 1.25rem 1.5rem 1.75rem; }
         h1, h2, h3 { color: var(--text); }
-        h1 { font-size: 30px !important; font-weight: 700 !important; }
-        h2 { font-size: 20px !important; font-weight: 600 !important; }
-        h3 { font-size: 17px !important; font-weight: 600 !important; }
-        p, label, li { color: var(--secondary); }
+        h1 { font-size: 40px !important; font-weight: 700 !important; }
+        h2 { font-size: 25px !important; font-weight: 600 !important; }
+        h3 { font-size: 20px !important; font-weight: 600 !important; }
+        p, label, li { color: var(--secondary); font-size: 16px !important; line-height: 1.6 !important;}
+        [data-testid="stSidebar"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span { font-size: 15px !important; } [data-testid="stSidebar"] h2 { font-size: 23px !important; }
         [data-testid="stMetricValue"] { color: var(--text); }
+        .hero-brand { font-family: "Trebuchet MS", "Segoe UI", sans-serif; font-size: 58px; line-height: 1; font-weight: 900; letter-spacing: -2.5px; background: linear-gradient(90deg, #F8FAFC 0%, #A78BFA 48%, #22D3EE 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 28px rgba(124,92,252,0.18); }
+        .hero-subtitle { margin-top: 10px; font-size: 17px; font-weight: 700; letter-spacing: 3px; color: #22D3EE; }
+        .hero-tagline { margin-top: 8px; font-size: 15px; font-weight: 400; letter-spacing: .3px; color: #94A3B8; }
         [data-testid="stImage"] img { border-radius: 8px; }
         .brand-tagline { color: var(--secondary); font-size: 14px; }
         .mode-badge {
@@ -886,19 +904,32 @@ def _render_styles() -> None:
         .gesture-action { color: var(--secondary); font-size: 11px; margin-top: 2px; }
         .action-badge { display: inline-block; padding: 5px 9px; color: var(--text); background: var(--active); border: 1px solid var(--border); border-radius: 999px; font-size: 11px; font-weight: 600; }
         .muted-copy { color: var(--secondary); font-size: 13px; }
-        .stButton > button, [data-testid="stFormSubmitButton"] button {
-            min-height: 44px; color: white; background: var(--purple); border: 1px solid var(--purple);
-            border-radius: 9px; font-weight: 600;
+        .stButton > button,
+        [data-testid="stFormSubmitButton"] button {
+            min-height: 48px;
+            color: white;
+            background: var(--purple);
+            border: 1px solid var(--purple);
+            border-radius: 9px;
+            font-size: 15px !important;
+            font-weight: 600;
         }
         .stButton > button:hover, [data-testid="stFormSubmitButton"] button:hover { background: var(--active); border-color: var(--purple); color: white; }
-        [data-testid="stTextInput"] input { background: var(--surface); color: var(--text); border-color: var(--border); }
+        [data-testid="stTextInput"] input { background: var(--surface); color: var(--text); border-color: var(--border); font-size: 16px !important; min-height: 48px; }
         [data-testid="stProgress"] > div > div { background: var(--purple); }
         [data-testid="stAlert"] { background: var(--surface); border-color: var(--border); }
-        @media (max-width: 760px) {
+        [data-testid="stCaptionContainer"] {
+        font-size: 14px !important;
+    }
+            @media (max-width: 760px) {
             .block-container { padding: 1rem 0.8rem; }
             .gesture-tile { min-height: 82px; padding: 9px 3px; }
             .gesture-name { font-size: 11px; }
         }
+        .gesture-info-card { min-height: 78px; padding: 16px 10px; text-align: center; background: #101827; border: 1px solid #263247; border-radius: 12px; display: flex; flex-direction: column; justify-content: center; }
+        .gesture-info-title { font-size: 14px; font-weight: 700; color: #F8FAFC; letter-spacing: .5px; }
+        .gesture-info-action { margin-top: 7px; font-size: 12px; color: #94A3B8; text-transform: uppercase; }
+        .quiz-gesture-hint { margin: 12px 0 18px; padding: 12px 16px; text-align: center; background: rgba(124,92,252,.08); border: 1px solid #263247; border-radius: 10px; color: #A78BFA; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1040,8 +1071,83 @@ def render_quiz_mode() -> None:
 
             st.success(
                 f"Quiz completed! Score: **{score}/{total}**"
+            ) 
+    def render_quiz_mode() -> None:
+        questions = st.session_state.get("quiz_questions", [])
+
+        if not questions:
+            return
+
+        st.divider()
+
+        st.markdown("## AI QUIZ MODE")
+        st.caption("Test your understanding of the current topic.")
+
+        topic = st.session_state.get("current_topic", "").strip()
+
+        if topic:
+            st.info(f"Topic: **{topic}**")
+
+        with st.form("quiz_form"):
+            selected_answers = {}
+
+            for index, question in enumerate(questions):
+                st.markdown(
+                    f"### Question {index + 1}"
+                )
+
+                st.markdown(
+                    f"**{question['question']}**"
+                )
+
+                selected_answers[index] = st.radio(
+                    "Answer",
+                    question["options"],
+                    key=f"quiz_answer_{index}",
+                    label_visibility="collapsed",
+                )
+
+                if index < len(questions) - 1:
+                    st.divider()
+
+            submit_quiz = st.form_submit_button(
+                "SUBMIT QUIZ",
+                use_container_width=True,
             )
 
+        if submit_quiz:
+            score = 0
+
+            for index, question in enumerate(questions):
+                if selected_answers[index] == question["answer"]:
+                    score += 1
+
+            st.session_state["quiz_score"] = score
+            st.session_state["quiz_submitted"] = True
+
+        if st.session_state.get("quiz_submitted", False):
+            score = st.session_state.get("quiz_score", 0)
+            total = len(questions)
+
+            st.markdown("---")
+            st.markdown("### QUIZ RESULT")
+
+            st.success(
+                f"Your Score: **{score}/{total}**"
+            )
+
+            percentage = int((score / total) * 100)
+
+            if percentage == 100:
+                st.success("Excellent! You mastered this topic.")
+            elif percentage >= 60:
+                st.info(
+                    "Good job! Review the topic once more to strengthen your understanding."
+                )
+            else:
+                st.warning(
+                    "Keep practicing. Try Simplify or Example before attempting the quiz again."
+                )
 def main() -> None:
     ensure_session_state()
     _render_styles()
@@ -1055,8 +1161,13 @@ def main() -> None:
             st.session_state["model_load_error"] = "Gesture model could not be loaded."
 
     with st.sidebar:
-        st.markdown("## GestureAI")
-        st.caption("Hands-free AI learning")
+        if LOGO_PATH.exists():
+            st.image(
+                str(LOGO_PATH),
+                width=200,
+            )
+
+        st.caption("Move Naturally,Control Digitally")
         st.markdown("**CONTROLS**")
         st.toggle("Camera", key="camera_enabled", on_change=on_camera_toggle)
         st.toggle("Gesture Recognition", key="gesture_enabled")
@@ -1085,65 +1196,153 @@ def main() -> None:
             st.caption("AI · Not verified")
 
     badge_text, badge_color = _ai_badge(service)
-    header_left, header_right = st.columns([0.78, 0.22], vertical_alignment="center")
+
+    header_left, header_right = st.columns(
+        [0.78, 0.22],
+        vertical_alignment="center",
+    )
     with header_left:
-        logo_col, title_col = st.columns([0.12, 0.88], vertical_alignment="center")
-        with logo_col:
-            if LOGO_PATH.exists():
-                st.image(str(LOGO_PATH), width=54)
-        with title_col:
-            st.markdown("# GestureAI")
-            st.markdown('<div class="brand-tagline">Move naturally. Learn intelligently.</div>', unsafe_allow_html=True)
-    with header_right:
         st.markdown(
-            f'<div style="text-align:right"><span class="mode-badge"><span class="mode-dot" style="background:{badge_color}"></span>{badge_text}</span></div>',
+            "<div style='padding:12px 0 10px 0;'>"
+            "<div class='hero-brand'>GestureAI</div>"
+            "<div class='hero-subtitle'>HANDS-FREE PERSONALIZED AI INTELLIGENCE PLATFORM</div>"
+            "<div class='hero-tagline'>Learn naturally. Understand deeply. Interact intelligently.</div>"
+            "</div>",
             unsafe_allow_html=True,
         )
-    st.divider()
+        
+    with header_right:
+        st.markdown(
+            f"""
+            <div style="text-align:right;">
+                <span class="mode-badge">
+                    <span class="mode-dot"
+                        style="background:{badge_color}">
+                    </span>
+                    {badge_text}
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
+    st.divider()
     left_column, right_column = st.columns([0.9, 1.1], gap="large")
     with left_column:
-        st.markdown("## LIVE GESTURE INPUT")
-        camera_label = "Camera Active" if st.session_state.get("camera_running") else "Camera Off"
-        st.caption(camera_label)
-        image_placeholder = st.empty()
-        gesture_placeholder = st.empty()
-        confidence_placeholder = st.empty()
-        progress_placeholder = st.empty()
-        status_placeholder = st.empty()
-        render_live_camera(
-            image_placeholder,
-            gesture_placeholder,
-            confidence_placeholder,
-            progress_placeholder,
-            status_placeholder,
-        )
-        if st.session_state.get("model_load_error"):
-            st.error("Gesture model could not be loaded.")
+        with st.container(border=True):
+            st.markdown("## LIVE GESTURE INPUT")
+
+            camera_label = (
+                "Camera Active"
+                if st.session_state.get("camera_running")
+                else "Camera Off"
+            )
+
+            st.caption(camera_label)
+
+            image_placeholder = st.empty()
+            gesture_placeholder = st.empty()
+            confidence_placeholder = st.empty()
+            progress_placeholder = st.empty()
+            status_placeholder = st.empty()
+
+            render_live_camera(
+                image_placeholder,
+                gesture_placeholder,
+                confidence_placeholder,
+                progress_placeholder,
+                status_placeholder,
+            )
+
+            if st.session_state.get("model_load_error"):
+                st.error("Gesture model could not be loaded.")
 
     with right_column:
-        st.markdown("## AI STUDY ASSISTANT")
-        st.caption("Ask anything. Learn naturally.")
-        with st.form("ask_ai_form", clear_on_submit=False):
-            st.text_input("Ask a question or enter a topic...", key=st.session_state["topic_widget_key"])
-            ask = st.form_submit_button("ASK AI", use_container_width=True)
-        if ask:
-            typed_topic = st.session_state.get(st.session_state["topic_widget_key"], "")
-            started = queue_ai_action("EXPLAIN", typed_topic)
-            if started:
-                st.session_state["gesture_status"] = "AI is thinking..."
+        with st.container(border=True):
 
-        topic_placeholder = st.empty()
-        action_placeholder = st.empty()
-        ai_status_placeholder = st.empty()
-        response_placeholder = st.empty()
-        render_ai_response(
-            topic_placeholder,
-            action_placeholder,
-            ai_status_placeholder,
-            response_placeholder,
-        )
+            st.markdown("## AI STUDY ASSISTANT")
+            st.caption("Ask anything. Learn naturally.")
 
+            with st.form("ask_ai_form", clear_on_submit=False):
+                st.text_input(
+                    "Ask a question or enter a topic...",
+                    key=st.session_state["topic_widget_key"],
+                )
+
+                ask = st.form_submit_button(
+                    "ASK AI",
+                    use_container_width=True,
+                )
+
+            if ask:
+                typed_topic = st.session_state.get(
+                    st.session_state["topic_widget_key"],
+                    "",
+                )
+
+                started = queue_ai_action(
+                    "EXPLAIN",
+                    typed_topic,
+                )
+
+                if started:
+                    st.session_state["gesture_status"] = "AI is thinking..."
+
+            topic_placeholder = st.empty()
+            action_placeholder = st.empty()
+            ai_status_placeholder = st.empty()
+            response_placeholder = st.empty()
+
+            render_ai_response(
+                topic_placeholder,
+                action_placeholder,
+                ai_status_placeholder,
+                response_placeholder,
+            )
+
+            # ------------------------------------------------------------
+            # GESTURE INSTRUCTIONS
+            # ------------------------------------------------------------
+            st.markdown("## HOW TO USE GESTUREAI")
+
+            st.caption("Use these gestures to interact with the AI study assistant.")
+
+            gesture_info = [
+                ("OPEN PALM", "EXPLAIN"),
+                ("THUMBS UP", "DEEP DIVE"),
+                ("THUMBS DOWN", "SIMPLIFY"),
+                ("V SIGN", "EXAMPLE"),
+                ("FIST", "RESET"),
+            ]
+
+            gesture_cols = st.columns(5)
+
+            for col, (gesture, action) in zip(gesture_cols, gesture_info):
+                with col:
+                    st.markdown(
+                        f"""
+                        <div class="gesture-info-card">
+                            <div class="gesture-info-title">{gesture}</div>
+                            <div class="gesture-info-action">{action}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown(
+                """
+                <div class="quiz-gesture-hint">
+                    <strong>V SIGN + THUMBS UP</strong>
+                    <span>START QUIZ</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Keep quiz completely separate
+            render_quiz_mode()
+
+            render_quiz_mode()
         # ------------------------------------------------------------
         # ANSWER LOCK / UNLOCK
         # ------------------------------------------------------------
@@ -1158,145 +1357,6 @@ def main() -> None:
                 if st.button("LOCK & LEARN", key="lock_answer", use_container_width=True):
                     st.session_state["answer_locked"] = True
                     st.rerun()
-# ============================================================
-# AI QUIZ MODE
-# ============================================================
-
-st.markdown("## 🧠 AI QUIZ MODE")
-st.caption("Test your understanding of the current topic.")
-
-current_topic = st.session_state.get("current_topic", "").strip()
-
-if "quiz_questions" not in st.session_state:
-    st.session_state["quiz_questions"] = []
-
-if "quiz_score" not in st.session_state:
-    st.session_state["quiz_score"] = 0
-
-if "quiz_submitted" not in st.session_state:
-    st.session_state["quiz_submitted"] = False
-
-quiz_col1, quiz_col2 = st.columns([3, 1])
-
-with quiz_col1:
-    if current_topic:
-        st.info(f"Topic: **{current_topic}**")
-    else:
-        st.info("Enter a topic above first.")
-
-with quiz_col2:
-    generate_button = st.button(
-        "🧠 Generate Quiz",
-        use_container_width=True,
-    )
-
-if generate_button:
-    if not current_topic:
-        st.warning("Please enter a topic first.")
-    else:
-        questions = generate_quiz(current_topic)
-
-        if questions:
-            st.session_state["quiz_questions"] = questions
-            st.session_state["quiz_score"] = 0
-            st.session_state["quiz_submitted"] = False
-            st.rerun()
-        else:
-            st.warning(
-                "No quiz is available for this topic yet."
-            )
-
-questions = st.session_state.get("quiz_questions", [])
-
-if questions:
-    st.markdown("### Test Yourself")
-
-    with st.form("quiz_form"):
-
-        selected_answers = {}
-
-        for index, question in enumerate(questions):
-
-            st.markdown(
-                f"**Q{index + 1}. {question['question']}**"
-            )
-
-            selected_answers[index] = st.radio(
-                "Choose an answer:",
-                question["options"],
-                key=f"quiz_answer_{index}",
-                label_visibility="collapsed",
-            )
-
-            st.divider()
-
-        submit_quiz = st.form_submit_button(
-            "✅ Submit Quiz",
-            use_container_width=True,
-        )
-
-    if submit_quiz:
-
-        score = 0
-
-        for index, question in enumerate(questions):
-
-            if selected_answers[index] == question["answer"]:
-                score += 1
-
-        st.session_state["quiz_score"] = score
-        st.session_state["quiz_submitted"] = True
-
-    if st.session_state.get("quiz_submitted"):
-
-        score = st.session_state["quiz_score"]
-        total = len(questions)
-
-        st.success(
-            f"🎯 Your Score: **{score}/{total}**"
-        )
-
-        percentage = int((score / total) * 100)
-
-        if percentage == 100:
-            st.balloons()
-            st.success("Excellent! You mastered this topic.")
-
-        elif percentage >= 60:
-            st.info(
-                "Good job! Review the topic once more to strengthen your understanding."
-            )
-
-        else:
-            st.warning(
-                "Keep practicing. Try using Simplify or Example before attempting the quiz again."
-            )
-
-    st.divider()
-    st.markdown("### GESTURE COMMANDS")
-    command_columns = st.columns(5, gap="small")
-    active_gesture = st.session_state.get("active_gesture")
-    command_rows = [
-        ("OPEN_PALM", "EXPLAIN"),
-        ("THUMBS_UP", "DEEP DIVE"),
-        ("THUMBS_DOWN", "SIMPLIFY"),
-        ("V_SIGN", "EXAMPLE"),
-        ("FIST", "RESET"),
-    ]
-    for column, (gesture, action) in zip(command_columns, command_rows):
-        tile_class = "gesture-tile active" if active_gesture == gesture else "gesture-tile"
-        column.markdown(
-            f'<div class="{tile_class}"><div class="gesture-icon">{GESTURE_ICONS[gesture]}</div>'
-            f'<div class="gesture-name">{GESTURE_NAMES[gesture].upper()}</div>'
-            f'<div class="gesture-action">{action}</div></div>',
-            unsafe_allow_html=True,
-        )
-
-    st.caption(
-        f"Gestures used: {st.session_state['gesture_count']} · "
-        f"AI interactions: {st.session_state['ai_interactions']} · "
-        f"Last action: {st.session_state['last_action']}"
-    )
 
 
 if __name__ == "__main__":
